@@ -1,0 +1,39 @@
+[package]
+name = "URIELV1"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "uriel_ui"
+path = "src/URIEL_UI.rs"
+
+[[bin]]
+name = "smie_test"
+path = "src/main.rs"
+
+[[bin]]
+name = "smie_bench"
+path = "src/smie_bench.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+bincode = "1.3"
+lz4 = "1.28.1"
+redis = "0.32.4"
+regex = "1.11.1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.142"
+zstd = "0.13.3"
+crossbeam-channel = "0.5"
+burn = { path = "C:/Users/brinn/Source Builds/burn/crates/burn" }
+burn-tensor = { path = "C:/Users/brinn/Source Builds/burn/crates/burn-tensor" }
+burn-ndarray = { path = "C:/Users/brinn/Source Builds/burn/crates/burn-ndarray" }
+rand = "0.8"
+rand_chacha = "0.3"
+ndarray = "0.15"
+rfd = "0.13"
+eframe = "0.27"
+faiss-sys = "0.6.2"
+anyhow = "1.0.98"
+
