@@ -1,15 +1,15 @@
 URIEL PROPRIETARY LICENSE
-Version 1.0 – [2025-08-11]
+Version 1.0 – 2025-08-11
 
-Copyright © [2025] [RiftForged Development Inc]
+Copyright © 2025 RiftForged Development Inc
 
 1. Ownership
 
-All rights, title, and interest in and to URIEL, including all associated code, data, designs, and documentation (the “Software”), are and shall remain the sole property of [Your Name or Company].
+All rights, title, and interest in and to URIEL, including all associated code, data, designs, and documentation (the “Software”), are and shall remain the sole property of RiftForged Development Inc.
 
 2. License Grant
 
-You are granted a limited, non-exclusive, non-transferable, and revocable license to use the Software solely for evaluation and demonstration purposes. Any other use — including, without limitation, commercial use, modification, distribution, sublicensing, or reverse engineering — is strictly prohibited without the prior written consent of [Your Name or Company].
+You are granted a limited, non-exclusive, non-transferable, and revocable license to use the Software solely for evaluation and demonstration purposes. Any other use — including, without limitation, commercial use, modification, distribution, sublicensing, or reverse engineering — is strictly prohibited without the prior written consent of RiftForged Development Inc.
 
 3. Restrictions
 
@@ -27,7 +27,7 @@ If provided access to the Software, you agree to treat it as confidential and to
 
 5. Termination
 
-This license is effective until terminated. [Your Name or Company] may terminate this license at any time without notice if you breach any term. Upon termination, you must destroy all copies of the Software in your possession.
+This license is effective until terminated. RiftForged Development Inc may terminate this license at any time without notice if you breach any term. Upon termination, you must destroy all copies of the Software in your possession.
 
 6. Disclaimer of Warranty
 
@@ -35,11 +35,11 @@ The Software is provided “AS IS” without warranty of any kind, express or im
 
 7. Limitation of Liability
 
-In no event shall [Your Name or Company] be liable for any damages, including but not limited to direct, indirect, incidental, special, or consequential damages, arising out of or related to the use of or inability to use the Software.
+In no event shall RiftForged Development Inc be liable for any damages, including but not limited to direct, indirect, incidental, special, or consequential damages, arising out of or related to the use of or inability to use the Software.
 
 8. Governing Law
 
-This License shall be governed by and construed in accordance with the laws of [Your Country/Province/State], without regard to its conflict of laws principles.
+This License shall be governed by and construed in accordance with the laws of Ontario, Canada, without regard to its conflict of laws principles.
 
 END OF LICENSE
 
