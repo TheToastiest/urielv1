@@ -1,7 +1,7 @@
 URIEL PROPRIETARY LICENSE
-Version 1.0 – [Date]
+Version 1.0 – [2025-08-11]
 
-Copyright © [Year] [Your Name or Company]
+Copyright © [2025] [RiftForged Development Inc]
 
 1. Ownership
 
