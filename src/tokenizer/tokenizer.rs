@@ -29,7 +29,12 @@ impl Vocab {
             encoding_mode: mode,
         }
     }
-
+    pub fn size(&self) -> usize {
+        self.index_to_char.len()
+    }
+    pub fn mode(&self) -> &EncodingMode {
+        &self.encoding_mode
+    }
     pub fn encode(&self, text: &str, max_len: usize) -> Vec<usize> {
         match self.encoding_mode {
             EncodingMode::Readable => self.encode_readable(text, max_len),

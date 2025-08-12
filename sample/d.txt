@@ -1,1 +1,13 @@
 physx server loading cudacoremanager... failed
+
+
+
+Bench v0.1 — reproducible
+K=32 | Trials=20k | Build=--release
+Corpus: <N> docs, avg <X>KB | Seed fixed
+HW: <i7-14650HX/64GB Ram/Win11>
+
+Results:
+Search: P50 2.0µs / P95 12.0µs / P99 16.0µs
+Ingest: P50 2.9ms / P95 3.5ms / P99 4.1ms
+CSV + commands included.

@@ -1,5 +1,5 @@
 mod Microthalamus;
-mod Callosum;
+mod callosum;
 mod URIEL_UI;
 
 fn main() {

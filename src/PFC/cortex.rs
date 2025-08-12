@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::Microthalamus::microthalamus::SyntheticDrive;
-use crate::Parietal::parietal::SalienceScore;
+use crate::parietal::parietal::SalienceScore;
 
 use super::reasoning_selector::select_reasoning_mode;
 // ⬇️ pull in the type, not the free fn

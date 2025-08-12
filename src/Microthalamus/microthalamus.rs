@@ -180,7 +180,7 @@ impl MicroThalamus {
 
         // Curiosity tracks general “interesting/novel” stimuli
         if let Some(curiosity) = self.drives.get_mut("Curiosity") {
-            curiosity.apply_urgency(urgency_score * 0.6);
+            curiosity.apply_urgency(urgency_score * 0.7);
         }
 
         // Conflict resolution when mismatch is present

@@ -9,6 +9,12 @@ pub mod burn_model;
 pub mod primordial;
 //pub mod hippocampus;
 pub mod index;
+pub mod infer;
+pub mod memory_bridge;
+pub mod kv_facts;
+pub mod fact_parse;
+pub mod hippocampus_adapter;
+
 // Public use for upstream systems
 pub use pipeline::{ingest, uriel_recall};
 pub use burn_model::embed_text;

@@ -1,4 +1,4 @@
-use URIELV1::Parietal::parietal::*;
+use URIELV1::parietal::parietal::*;
 use std::collections::HashMap;
 #[test]
 fn understanding_not_always_high() {

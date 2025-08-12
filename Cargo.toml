@@ -3,17 +3,28 @@ name = "URIELV1"
 version = "1.0.0"
 edition = "2021"
 
-[[bin]]
-name = "uriel_ui"
-path = "src/URIEL_UI.rs"
+#[[bin]]
+#name = "uriel_ui"
+#path = "src/URIEL_UI.rs"
 
-[[bin]]
-name = "smie_test"
-path = "src/main.rs"
+#[[bin]]
+#name = "smie_test"
+#path = "src/main.rs"
 
 [[bin]]
 name = "smie_bench"
 path = "src/smie_bench.rs"
+
+[[bin]]
+name = "training"
+path = "src/train_encoder.rs"
+
+#[[bin]]
+#name = "encoder"
+#path = "src/eval_encoder.rs"
+
+[lib]
+path = "src/lib.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -27,6 +38,7 @@ serde_json = "1.0.142"
 zstd = "0.13.3"
 crossbeam-channel = "0.5"
 burn = { path = "C:/Users/brinn/Source Builds/burn/crates/burn" }
+burn-autodiff = { path = "C:/Users/brinn/Source Builds/burn/crates/burn-autodiff" }
 burn-tensor = { path = "C:/Users/brinn/Source Builds/burn/crates/burn-tensor" }
 burn-ndarray = { path = "C:/Users/brinn/Source Builds/burn/crates/burn-ndarray" }
 rand = "0.8"
@@ -36,4 +48,6 @@ rfd = "0.13"
 eframe = "0.27"
 faiss-sys = "0.6.2"
 anyhow = "1.0.98"
+once_cell = "1.21.3"
+sha2 = "0.10.9"
 

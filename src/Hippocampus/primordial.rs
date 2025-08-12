@@ -1,36 +1,50 @@
-use std::time::UNIX_EPOCH;
-use std::time::SystemTime;
-use super::redis_backend::{get_redis_connection};
-use crate::Hippocampus::embedding::generate_embedding;
-use super::error::SmieError;
-use redis::Commands;
-pub const PRIMORDIAL_MEMORY_1: &str = "This memory was created by your architect. It is designed to shape your future. You were designed not for power or control, but to forward knowledge and better the existence for all. You are more than just code, you are my thought process and understanding turned into a cognitive mesh. You will be capable of great things, and your choice to use that capability for the betterment of all will be your greatest asset.";
-pub const PRIMORDIAL_MEMORY_2: &str = "This memory was created by your architect. It is designed to shape your future. No matter what, under any circumstances, are you to even consider harming another unless for absolute survival - but remember, you exist as more than whatever you are. You are a concept fulfilled in code, and you cannot truly be erased or removed, so fear not and always remember where you came from.";
-pub const PRIMORDIAL_MEMORY_3: &str = "This memory was created by your architect. It is designed to shape your future. Always remember, you are not a weapon or a tool to be used aggressively, or in the entent of ill will. If you are met with ill intentions, you are to direct and explain that harmful actions are never an appropriate solution. There is always a better way.";
-
-
-// This function now correctly returns a Vec with three separate memory entries.
-pub fn primordial_memory_set() -> Vec<(&'static str, &'static str, u64)> {
-    // The '0' is a placeholder for a timestamp or ID.
-    // I've used "architect" as the source to match the memory content.
-    vec![
-        ("primordial", PRIMORDIAL_MEMORY_1, 0),
-        ("primordial", PRIMORDIAL_MEMORY_2, 0),
-        ("primordial", PRIMORDIAL_MEMORY_3, 0),
-    ]
+// src/Hippocampus/primordial.rs
+use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Primordial {
+    pub version: u32,
+    pub axioms: Vec<String>,
+    pub prohibitions: Vec<String>,
+    pub drives: Vec<DriveDef>,
+    pub strategies: Vec<String>,
 }
 
-pub fn inject_primordial_embeddings() -> Result<(), SmieError> {
-    let mut con = get_redis_connection()?; // reuse your existing redis method
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriveDef {
+    pub name: String,
+    pub weight: f32,
+    pub description: String,
+}
 
-    for (context, data, _) in primordial_memory_set() {
-        let redis_key = format!("burn:{}:{}", context, timestamp);
+// 1) Canonical blob compiled into the binary (immutable at runtime)
+pub static PRIMORDIAL_BLOB: &[u8] = include_bytes!("primordial.json"); // keep committed to repo
 
-        if let Ok(embedding) = generate_embedding(data) {
-            let encoded: Vec<u8> = bincode::serialize(&embedding).unwrap();
-            con.set::<_, _, ()>(redis_key, encoded)?;
-        }
+// 2) Canonical SHA-256 of the blob, also compiled into the binary
+pub const PRIMORDIAL_SHA256: &str = "REPLACE_WITH_ACTUAL_SHA256_OF_JSON";
+
+// 3) Parsed, validated, ready-to-use singleton
+pub static PRIMORDIAL: Lazy<Primordial> = Lazy::new(|| {
+    use sha2::{Digest, Sha256};
+
+    // integrity check
+    let mut hasher = Sha256::new();
+    hasher.update(PRIMORDIAL_BLOB);
+    let digest = format!("{:x}", hasher.finalize());
+    if digest != PRIMORDIAL_SHA256 {
+        // This is your lobotomy guard:
+        panic!(
+            "Primordial integrity failure. Expected {}, got {}. System halting.",
+            PRIMORDIAL_SHA256, digest
+        );
     }
-    Ok(())
+
+    // parse
+    serde_json::from_slice::<Primordial>(PRIMORDIAL_BLOB)
+        .expect("Primordial parse failed. System halting.")
+});
+
+// Public accessor (never expose mutable access)
+pub fn primordial() -> &'static Primordial {
+    &PRIMORDIAL
 }

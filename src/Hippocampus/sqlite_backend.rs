@@ -41,7 +41,7 @@ pub fn store_entry(context: &str, data: &str, timestamp: Option<u64>) -> Result<
 }
 
 /// Retrieves all semantic memory entries for a context
-pub fn recall_all(context: &str) -> Result<Vec<SemanticMemoryEntry>, SmieError> {
+    pub fn recall_all(context: &str) -> Result<Vec<SemanticMemoryEntry>, SmieError> {
     let conn = get_connection()?;
     let mut stmt = conn.prepare(
         "SELECT context, data, timestamp FROM semantic_memory WHERE context = ?1",

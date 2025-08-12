@@ -8,6 +8,7 @@ use rand_chacha::ChaCha20Rng;
 ///   x: [batch, in_dim]
 ///   W: [in_dim, out_dim]
 ///   b: [out_dim]
+#[derive(Debug, Module)]
 pub struct FixedWeightEmbedder<B: Backend> {
     w: Tensor<B, 2>,
     b: Tensor<B, 1>,

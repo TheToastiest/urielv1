@@ -1,13 +1,14 @@
 pub mod Hippocampus;
-pub mod Thalamus;
 pub mod Microthalamus;
-pub mod Parietal;
+pub mod parietal;
 pub mod Temporal;
 pub mod PFC;
 pub mod tokenizer;
 pub mod embedder;
-
-pub mod Callosum;
+pub mod core;
+pub mod Inference;
+pub mod Learning;
+pub mod callosum;
 
 pub mod Frontal;
 

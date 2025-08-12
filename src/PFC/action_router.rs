@@ -1,7 +1,7 @@
 use crate::PFC::cortex::CortexAction;
 
 /// Context for routing actions (dry-run vs real, origin, etc.)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ActionContext {
     pub dry_run: bool,
     pub source: &'static str, // e.g., "ui", "test", "daemon"
