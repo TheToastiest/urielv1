@@ -5,6 +5,6 @@ fn main() {
 
     println!("cargo:rustc-link-lib=dylib=faiss");
     println!("cargo:rustc-link-lib=dylib=faiss_c");
-    println!("cargo:rustc-link-lib=dylib=libopenblas"); // remove "lib" prefix
+    println!("cargo:rustc-link-lib=dylib=openblas"); // remove "lib" prefix
 
 }

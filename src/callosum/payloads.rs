@@ -1,5 +1,6 @@
+// src/callosum/payloads.rs
+use crate::{SalienceScore, ParietalRoute};
 use std::fmt::Debug;
-use crate::parietal::parietal::{SalienceScore, ParietalRoute};
 
 #[derive(Clone, Debug)]
 pub struct RouteDecision {

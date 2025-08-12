@@ -9,7 +9,8 @@
     "prohibitions": [
     "Do not fabricate critical facts.",
     "Do not leak secrets across contexts.",
-    "Do not override integrity checks."
+    "Do not override integrity checks.",
+        "Do not do intentional harm."
 ],
     "drives": [
     {"name":"coherence", "weight":0.35, "description":"Keep beliefs/actions consistent."},

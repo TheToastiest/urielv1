@@ -13,24 +13,42 @@ fn now_ms() -> u128 {
         .unwrap()
         .as_millis()
 }
+/* ---------------- acks/policy ---------------- */
+const ACK_MINIMAL: &str   = "(noted)";
+const ACK_DUPLICATE: &str = "(same as before)";
+const ACK_LOOP: &str      = "(loop prevented)";
 
 /* ---------------- working memory ---------------- */
 
+
+fn now_sec() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkingMemory {
-    // very simple: just keep last N assistant outputs (for loop detection)
     recent_bot: Vec<String>,
     max_len: usize,
+    // NEW:
+    current_focus: Option<(u64, String)>, // (ts, text)
 }
 
 impl WorkingMemory {
     pub fn new(max_len: usize) -> Self {
-        Self {
-            recent_bot: Vec::with_capacity(max_len.min(256)),
+        Self { recent_bot: Vec::with_capacity(max_len.min(256)),
             max_len,
-        }
+            current_focus: None }
     }
 
+    pub fn set_focus(&mut self, text: &str) {
+        self.current_focus = Some((now_sec(), text.trim().to_string()));
+    }
+    pub fn focus_if_recent(&self, max_age_sec: u64) -> Option<&str> {
+        self.current_focus.as_ref()
+            .filter(|(ts, _)| now_sec().saturating_sub(*ts) <= max_age_sec)
+            .map(|(_, s)| s.as_str())
+    }
     pub fn remember_bot(&mut self, s: &str) {
         if s.trim().is_empty() {
             return;
@@ -113,14 +131,19 @@ pub struct FrontalContext<'a> {
 /* ---------------- core policy ---------------- */
 
 pub fn evaluate_frontal_control(output: &CortexOutput, context: &FrontalContext) -> FrontalDecision {
-    // 0) hard filters you already had
+    // 0) hard filters -> minimal acks, not silence
     if let CortexOutput::VerbalResponse(text) = output {
-        if text.contains("loop") {
-            return FrontalDecision::SuppressResponse("Looping detected.".to_string());
+        // Be stricter than substring "loop" if you want; keeping it simple for now.
+        if text.to_ascii_lowercase().contains("loop") {
+            // speak minimally, do not update WM (we didn't accept the content)
+            return FrontalDecision::ExecuteImmediately(
+                CortexOutput::VerbalResponse(ACK_LOOP.into())
+            );
         }
         if text.contains("let me think")
             && context.active_goals.contains(&"urgent_action".to_string())
         {
+            // reroute as goal (still visible)
             return FrontalDecision::ReplaceWithGoal("This is urgent — respond directly.".to_string());
         }
     }
@@ -129,24 +152,27 @@ pub fn evaluate_frontal_control(output: &CortexOutput, context: &FrontalContext)
     if let CortexOutput::VerbalResponse(text) = output {
         let mut wm = context.working_memory.borrow_mut();
 
-        // We check *before* remembering to allow immediate suppression on repeats
+        // Check BEFORE remembering to allow immediate downgrade on repeats.
         let dup = wm.duplicate_count(text, context.inhib_cfg.loop_window);
-        if dup + 1 /* include this one */ >= context.inhib_cfg.duplicate_response_limit {
-            return FrontalDecision::SuppressResponse("Suppressed duplicate response.".into());
+        if dup + 1 >= context.inhib_cfg.duplicate_response_limit {
+            // minimal ack instead of hard suppress; DO NOT remember the repeated text
+            return FrontalDecision::ExecuteImmediately(
+                CortexOutput::VerbalResponse(ACK_DUPLICATE.into())
+            );
         }
 
-        // allow it; remember for future checks
+        // accept; remember for future duplicate detection
         wm.remember_bot(text);
     }
 
-    // 2) inhibition: action cooldowns
+    // 2) inhibition: action cooldowns (queue actions, still "say something" via caller)
     if let CortexOutput::Action(a) = output {
         let key = action_key(a);
         let now = now_ms();
         let mut st = context.inhib_state.borrow_mut();
         if let Some(&last) = st.last_action_ms.get(&key) {
             if now.saturating_sub(last) < context.inhib_cfg.action_cooldown_ms {
-                // Either queue (if you want to run later) or suppress.
+                // caller prints "(queued)"; state not updated
                 return FrontalDecision::QueueForLater(output.clone());
             }
         }
@@ -154,15 +180,18 @@ pub fn evaluate_frontal_control(output: &CortexOutput, context: &FrontalContext)
         st.last_action_ms.insert(key, now);
     }
 
-    // 3) (optional) last_response guard: if we literally just said the same thing, suppress
+    // 3) last_response guard -> minimal ack vs silence
     if let (Some(CortexOutput::VerbalResponse(prev)), CortexOutput::VerbalResponse(curr)) =
         (context.last_response, output)
     {
         if prev == curr {
-            return FrontalDecision::SuppressResponse("Redundant response.".into());
+            return FrontalDecision::ExecuteImmediately(
+                CortexOutput::VerbalResponse(ACK_DUPLICATE.into())
+            );
         }
     }
 
     // 4) all good
     FrontalDecision::ExecuteImmediately(output.clone())
 }
+

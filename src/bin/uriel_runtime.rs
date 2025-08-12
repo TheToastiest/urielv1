@@ -12,7 +12,6 @@ use URIELV1::Hippocampus::sqlite_backend::recall_all;
 use URIELV1::Microthalamus::microthalamus::SyntheticDrive;
 use URIELV1::parietal::route_cfg::RouteCfg;
 use URIELV1::core::handle::handle_input_pfc;
-
 use URIELV1::PFC::context_retriever::{
     ContextRetriever, RetrieverCfg, VectorStore, Embeddings, MemoryHit, Embedding,
 };
@@ -42,19 +41,33 @@ struct ModelEmb<B: Backend> {
     model: Arc<Mutex<HippocampusModel<B>>>,
 }
 impl<B: Backend> ModelEmb<B> {
-    fn new(model: Arc<Mutex<HippocampusModel<B>>>) -> Self { Self { model } }
+    pub fn new(model: Arc<Mutex<HippocampusModel<B>>>) -> Self {
+        Self { model }
+    }
 }
+
 impl<B: Backend> Embeddings for ModelEmb<B> {
     fn embed(&self, text: &str) -> Result<Embedding, Box<dyn Error + Send + Sync>> {
+        use std::io;
+
         let model = self.model.lock().unwrap();
         let z_1xD = model.run_inference(text);
-        let mut v = z_1xD.to_data().as_slice::<f32>().unwrap().to_vec();
+        let mut v = z_1xD
+            .to_data()
+            .as_slice::<f32>()
+            .map_err(|e| -> Box<dyn Error + Send + Sync> {
+                Box::new(io::Error::new(io::ErrorKind::Other, format!("{e:?}")))
+            })?
+            .to_vec();
+
         // L2 normalize
         let n = (v.iter().map(|x| x * x).sum::<f32>()).sqrt().max(1e-6);
         for x in &mut v { *x /= n; }
+
         Ok(v)
     }
 }
+
 
 // ---------- SQLite vector store (brute-force scan) ----------
 struct SqliteScanVS<E: Embeddings> {
@@ -70,39 +83,91 @@ impl<E: Embeddings> VectorStore for SqliteScanVS<E> {
     fn search(&self, q: &Embedding, top_k: usize)
               -> Result<Vec<MemoryHit>, Box<dyn Error + Send + Sync>>
     {
-        let rows = recall_all(&self.context).map_err(|e| {
-            Box::<dyn std::error::Error + Send + Sync>::from(
-                std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
-            )
-        })?;
+        use rusqlite::{params, Connection};
+        use std::{cmp::Ordering, io};
 
-        let mut out = Vec::with_capacity(rows.len());
-        for r in rows {
-            let e = self.emb.embed(&r.data)?; // embed stored text
-            let sim = q.iter().zip(e.iter()).map(|(a,b)| a*b).sum::<f32>().clamp(0.0, 1.0);
-            out.push(MemoryHit { id: format!("{}:{}", self.context, r.timestamp), sim, text: r.data });
+        // Load embeddings for this context (keys like "sm:{context}:{ts}")
+        let conn = Connection::open("db/semantic_embeddings.db")
+            .map_err(|e| Box::<dyn Error + Send + Sync>::from(
+                io::Error::new(io::ErrorKind::Other, e.to_string())))?;
+
+        let like = format!("sm:{}:%", self.context);
+        let mut stmt = conn.prepare(
+            "SELECT redis_key, embedding FROM semantic_embeddings WHERE redis_key LIKE ?1"
+        ).map_err(|e| Box::<dyn Error + Send + Sync>::from(
+            io::Error::new(io::ErrorKind::Other, e.to_string())))?;
+
+        let mut rows = stmt.query(params![like]).map_err(|e|
+            Box::<dyn Error + Send + Sync>::from(io::Error::new(io::ErrorKind::Other, e.to_string()))
+        )?;
+
+        // Score = dot (vectors already normalized at ingest)
+        let mut scored: Vec<MemoryHit> = Vec::new();
+        while let Some(row) = rows.next().map_err(|e|
+            Box::<dyn Error + Send + Sync>::from(io::Error::new(io::ErrorKind::Other, e.to_string()))
+        )? {
+            let key: String = row.get(0).map_err(|e|
+                Box::<dyn Error + Send + Sync>::from(io::Error::new(io::ErrorKind::Other, e.to_string()))
+            )?;
+            let blob: Vec<u8> = row.get(1).map_err(|e|
+                Box::<dyn Error + Send + Sync>::from(io::Error::new(io::ErrorKind::Other, e.to_string()))
+            )?;
+            let ev: Vec<f32> = bincode::deserialize(&blob).map_err(|e|
+                Box::<dyn Error + Send + Sync>::from(io::Error::new(io::ErrorKind::Other, format!("bincode: {e}")))
+            )?;
+
+            let sim = q.iter().zip(ev.iter()).map(|(a,b)| a*b).sum::<f32>().clamp(0.0, 1.0);
+            scored.push(MemoryHit { id: key, sim, text: String::new() });
         }
-        out.sort_by(|a,b| b.sim.partial_cmp(&a.sim).unwrap_or(std::cmp::Ordering::Equal));
-        if out.len() > top_k { out.truncate(top_k); }
-        Ok(out)
+
+        // Partial select, then sort the top_k only
+        if scored.len() > top_k {
+            let k = top_k;
+            let (_, topk, _) = scored.select_nth_unstable_by(k, |a, b|
+                b.sim.partial_cmp(&a.sim).unwrap_or(Ordering::Equal));
+            scored[..k].sort_by(|a, b| b.sim.partial_cmp(&a.sim).unwrap_or(Ordering::Equal));
+            scored.truncate(k);
+        } else {
+            scored.sort_by(|a, b| b.sim.partial_cmp(&a.sim).unwrap_or(Ordering::Equal));
+        }
+
+        // Join text by timestamp (if you want the text here)
+        // If you prefer, leave text empty and let the caller fetch it.
+        let rows_text = recall_all(&self.context).map_err(|e|
+            Box::<dyn Error + Send + Sync>::from(io::Error::new(io::ErrorKind::Other, e.to_string()))
+        )?;
+        for m in &mut scored {
+            if let Some(ts) = m.id.rsplit(':').next().and_then(|s| s.parse::<u64>().ok()) {
+                if let Some(row) = rows_text.iter().find(|r| r.timestamp == ts) {
+                    m.text = row.data.clone();
+                }
+            }
+        }
+
+        Ok(scored)
     }
 }
 
 fn main() -> anyhow::Result<()> {
+    assert_primordial_invariants(); // enforce boot axioms
     type B = NdArray<f32>;
     let device = <B as Backend>::Device::default();
 
     // Load ONE model for runtime PFC path…
-    let model_runtime = HippocampusModel::<B>::load(
+    // ONE runtime model (used by the PFC path)
+    let model_runtime = HippocampusModel::<B>::load_or_init(
         &device,
         "R:/uriel/models/checkpoints/uriel_encoder_step008500.bin",
     );
 
-    // …and a SEPARATE instance wrapped for thread-safe embeddings.
-    let model_for_emb = Arc::new(Mutex::new(HippocampusModel::<B>::load(
-        &device,
-        "R:/uriel/models/checkpoints/uriel_encoder_step008500.bin",
-    )));
+    // A SEPARATE instance wrapped for thread-safe embeddings
+    let model_for_emb = Arc::new(Mutex::new(
+        HippocampusModel::<B>::load_or_init(
+            &device,
+            "R:/uriel/models/checkpoints/uriel_encoder_step008500.bin",
+        )
+    ));
+
 
     let emb = Arc::new(ModelEmb::new(model_for_emb));
     let vs  = Arc::new(SqliteScanVS::new(emb.clone(), "default"));
@@ -113,8 +178,9 @@ fn main() -> anyhow::Result<()> {
     let ctx = "default";
 
     // ★ ADDED: persistent Frontal state
-    let wm = WorkingMemory::new(50);
-    let inhib_state = InhibitionState::default();
+    // before loop:
+    let mut wm = WorkingMemory::new(50);
+    let mut inhib_state = InhibitionState::default();
     let inhib_cfg = InhibitionConfig::default();
     let mut last_output_opt: Option<CortexOutput> = None;
 
@@ -128,6 +194,14 @@ fn main() -> anyhow::Result<()> {
         if stdin.read_line(&mut line)? == 0 { break; }
         let input = line.trim();
         if input.eq_ignore_ascii_case("exit") || input.eq_ignore_ascii_case("quit") { break; }
+        // inside the loop, after reading `input`
+        if let Some(rest) = input.strip_prefix("store this:") {
+            pipeline::ingest(&model_runtime, ctx, rest.trim(), 7*24*3600, "runtime").map_err(|e| anyhow::anyhow!("ingest failed: {e}"))?;
+            // make it the current focus
+            wm.set_focus(rest.trim());
+            println!("(stored)");
+            continue;
+        }
 
         // Run your high-level handler to produce a textual reply
         let raw_text = match handle_input_pfc(&model_runtime, ctx, input, &drives, &cfg, &retriever) {
@@ -158,13 +232,8 @@ fn main() -> anyhow::Result<()> {
                 // (grab back the mutated state from the RefCells)
                 let wm_new = frontal_ctx.working_memory.into_inner();
                 let inhib_new = frontal_ctx.inhib_state.into_inner();
-
-                // update our persistent copies
-                // (WorkingMemory/InhibitionState derive Clone)
-                // NOTE: if you’d rather avoid clones, store RefCell in a higher-level struct.
-                // For now this is simple and fine.
-                // shadowing for brevity:
-                let _ = wm_new; let _ = inhib_new;
+                wm = wm_new;
+                inhib_state = inhib_new;
 
                 // say it
                 if let CortexOutput::VerbalResponse(text) = out.clone() {

@@ -1,20 +1,23 @@
 use std::collections::{HashMap, HashSet};
 use crate::Microthalamus::microthalamus::SyntheticDrive;
-use crate::Hippocampus::embedding::generate_embedding;
+// ⬇️ Use a pure embedder (no storage!) for drive alignment
+use crate::Hippocampus::infer::embed_text;
 // ⬇️ Thalamus-side deps for ingestion + error
-use crate::Hippocampus::{ingest_text, SmieError};
+use crate::Hippocampus::{ingest, SmieError};
+use burn::tensor::backend::Backend;
+use crate::Hippocampus::infer::HippocampusModel;
 
-// ---------- Tunables ----------
+/* ---------- Tunables ---------- */
 const W_URGENCY: f32 = 0.35;
-const W_FAMILIARITY: f32 = 0.20;
-const W_UNDERSTANDING: f32 = 0.20;
+const W_FAMILIARITY: f32 = 0.30;
+const W_UNDERSTANDING: f32 = 0.30;
 const W_DRIVE: f32 = 0.25;
 
-const RESPOND_THRESH: f32 = 0.50;
-const STORE_THRESH: f32   = 0.27;
-const RESEARCH_OVERRIDE_MIN_WEIGHT: f32 = 0.40;
+const RESPOND_THRESH: f32 = 0.40;
+const STORE_THRESH: f32   = 0.17;
+const RESEARCH_OVERRIDE_MIN_WEIGHT: f32 = 0.60;
 
-// ---------- Model ----------
+/* ---------- Model ---------- */
 #[derive(Debug, Clone)]
 pub struct SalienceScore {
     pub urgency: f32,
@@ -43,7 +46,7 @@ pub enum ParietalRoute {
     Suppress,
 }
 
-// ---------- text helpers ----------
+/* ---------- text helpers ---------- */
 trait ContainsAny {
     fn contains_any_word(&self, terms: &[&str]) -> bool;
 }
@@ -76,7 +79,7 @@ impl ContainsAnySubstr for str {
     }
 }
 
-// ---------- math ----------
+/* ---------- math ---------- */
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -84,7 +87,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
 }
 
-// ---------- main ----------
+/* ---------- main ---------- */
 pub fn evaluate_input(input: &str, drives: &HashMap<String, SyntheticDrive>) -> (SalienceScore, ParietalRoute) {
     // --- helpers ---
     fn is_question(t: &str) -> bool {
@@ -99,35 +102,43 @@ pub fn evaluate_input(input: &str, drives: &HashMap<String, SyntheticDrive>) -> 
             || t.starts_with("which ")
     }
 
-    // Urgency: detect boost words, then downshift if negated
+    // Urgency cues
     let urgent_word =
         input.contains_any_word(&["urgent","immediately","asap","now","quickly","promptly","swiftly"])
             || input.contains_any_substr(&["right now","as soon as","need this now"]);
     let negation = input.contains_any_substr(&["not urgent","no rush","later","whenever"]);
 
-    // ⬇ make mutable so we can bump it for questions
-    let mut urgency = if urgent_word && !negation { 0.90 } else if negation { 0.20 } else { 0.30 };
+    let mut urgency: f32 =
+        if urgent_word && !negation { 0.90 }
+        else if negation            { 0.20 }
+        else                        { 0.30 };
 
     // Familiarity
-    let familiarity = if input.contains_any_word(&["you","your","remember","commit","memory","i","me","my","we","they"]) {
+    let familiarity = if input.contains_any_word(&[
+        "you","your","remember","commit","memory","i","me","my","we","they"
+    ]) {
         0.60
     } else { 0.20 };
 
     // Understanding / research cues
     let mut understanding =
-        if input.contains_any_word(&["research","search","internet","define","explain","look","find","help","assist","scan","render","edit"])
-            || input.contains_any_substr(&["help me","assist me","scan for me","render for me","edit for me","edit this"])
-        { 0.60 } else { 0.25 };
-    let mut urgency: f32 =
-        if urgent_word && !negation { 0.90f32 }
-        else if negation            { 0.20f32 }
-        else                        { 0.30f32 };
-    // ❓ If it's a question, give it a meaningful boost and raise urgency a bit
+        if input.contains_any_word(&[
+            "research","search","internet","define","explain","look","find","help","assist","scan","render","edit"
+        ]) || input.contains_any_substr(&[
+            "help me","assist me","scan for me","render for me","edit for me","edit this"
+        ]) {
+            0.60
+        } else { 0.25 };
+
+    // ❓ Question boost
+
     if is_question(input) {
-        understanding = (understanding + 0.40f32).min(0.95f32);
+
+        understanding = f32::min(understanding + 0.40f32, 0.95f32);
+        urgency = f32::max(urgency, 0.60f32);
+
         if !negation {
-            urgency = urgency.max(0.60f32);
-            understanding = (understanding + 0.40f32).min(0.95f32);
+            urgency = urgency.max(0.60);
         }
         #[cfg(debug_assertions)]
         println!("❓ Question detected → understanding {:.2}, urgency {:.2}", understanding, urgency);
@@ -139,26 +150,22 @@ pub fn evaluate_input(input: &str, drives: &HashMap<String, SyntheticDrive>) -> 
             || input.contains_any_substr(&["look up","look this up","do some research","find info","search for"]);
 
     // Drive alignment via embedding similarity (max scaled)
-    let drive_alignment = match generate_embedding(input) {
-        Ok(input_vec) => {
-            let mut max_scaled = 0.0f32;
-            for drive in drives.values() {
-                let sim = cosine_similarity(&input_vec, &drive.vector);
-                let scaled = sim * drive.weight;
-                #[cfg(debug_assertions)]
-                println!("Drive '{}': similarity {:.2}, scaled weight {:.2}", drive.name, sim, scaled);
-                if scaled > max_scaled { max_scaled = scaled; }
-            }
-            max_scaled.clamp(0.0, 1.0)
-        }
-        Err(_) => 0.0,
-    };
+    // Use a pure embedding function; do NOT store from here.
+    let input_vec = embed_text(input);
+    let mut max_scaled = 0.0f32;
+    for drive in drives.values() {
+        let sim = cosine_similarity(&input_vec, &drive.vector);
+        let scaled = sim * drive.weight;
+        #[cfg(debug_assertions)]
+        println!("Drive '{}': similarity {:.2}, scaled weight {:.2}", drive.name, sim, scaled);
+        if scaled > max_scaled { max_scaled = scaled; }
+    }
+    let drive_alignment = max_scaled.clamp(0.0, 1.0);
 
     let score = SalienceScore::new(urgency, familiarity, understanding, drive_alignment);
 
     // ---------- routing ----------
-    // 🔁 Question override: always Respond so the PFC/retriever path runs.
-    // (If you prefer, gate this on score.final_weight >= 0.30.)
+    // Question override (ensures retrieval/PFC path)
     if is_question(input) {
         #[cfg(debug_assertions)]
         println!("➡️  Question override → Respond");
@@ -188,7 +195,6 @@ pub fn evaluate_input(input: &str, drives: &HashMap<String, SyntheticDrive>) -> 
     (score, route)
 }
 
-
 /* ================================
    Thalamus wrapper (ingest + API)
    ================================ */
@@ -213,16 +219,13 @@ impl std::fmt::Display for InputType {
         }
     }
 }
-pub fn strip_force_store_prefix<'a>(s: &'a str) -> Option<&'a str> {
-    // prefixes you want to honor
-    const PREFS: [&str; 4] = ["store this:", "remember:", "save:", "log:"];
 
+pub fn strip_force_store_prefix<'a>(s: &'a str) -> Option<&'a str> {
+    const PREFS: [&str; 4] = ["store this:", "remember:", "save:", "log:"];
     let trimmed = s.trim_start();
     let lower   = trimmed.to_ascii_lowercase();
-
     for p in PREFS {
         if lower.starts_with(p) {
-            // slice the original (preserve original casing after the prefix)
             let payload = trimmed[p.len()..].trim_start();
             return Some(payload);
         }
@@ -231,56 +234,65 @@ pub fn strip_force_store_prefix<'a>(s: &'a str) -> Option<&'a str> {
 }
 
 /// Returns (salience, route). Ingests when route != Suppress.
-pub fn handle_input_with_thalamus(
+const TTL_DEFAULT: u64     = 5 * 60;
+const TTL_SUPPRESSED: u64  = 60;         // short-lived cache when low-drive
+const ALWAYS_ACK_STORE: bool = true;     // print "(stored)" lines
+const ALWAYS_ACK_SUPPRESS: bool = true;  // print "(noted)" lines
+
+pub fn handle_input_with_thalamus<B: Backend>(
+    hip_model: &HippocampusModel<B>,
     context: &str,
     input: &str,
     source: &InputType,
     drives: &HashMap<String, SyntheticDrive>,
 ) -> Result<(SalienceScore, ParietalRoute), SmieError> {
-    let ttl_secs = 60 * 5;
+    let source_str = source.to_string();
+
+    // Forced store (prefixes)
     if let Some(payload) = strip_force_store_prefix(input) {
-        // you can still compute salience on the payload if you want metrics
         let (salience, _route) = evaluate_input(payload, drives);
-        ingest_text(context, payload, ttl_secs, &source.to_string())?;
-        println!("✅ Forced store: '{payload}'");
+        ingest(hip_model, context, payload, TTL_DEFAULT, &source_str)
+            .map_err(SmieError::Other)?;
+        if ALWAYS_ACK_STORE {
+            println!("(stored) {payload}");
+        }
+        // We *responded* with an ack already; no PFC needed.
         return Ok((salience, ParietalRoute::StoreOnly));
     }
-    // parietal salience + routing
+
+    // Normal path
     let (salience, route) = evaluate_input(input, drives);
 
-    println!(
-        "🧠 Salience: urgency {:.2}, familiarity {:.2}, understanding {:.2}, drive {:.2}, final {:.2} → {:?}",
-        salience.urgency,
-        salience.familiarity,
-        salience.understanding,
-        salience.drive_alignment,
-        salience.final_weight,
-        route
-    );
-
-    // Only ingest on Respond or StoreOnly, and only if input has substance
-    if !input.trim().is_empty() {
-        match route {
-            ParietalRoute::Respond | ParietalRoute::StoreOnly => {
-                // write into hippocampus cache/db (with TTL)
-                ingest_text(context, input, ttl_secs, &source.to_string())?;
+    match route {
+        ParietalRoute::Respond => {
+            // Speak via PFC later, but also persist the input (as you already do)
+            ingest(hip_model, context, input, TTL_DEFAULT, &source_str)
+                .map_err(SmieError::Other)?;
+            // Don't print here; let PFC/Frontal produce the main reply.
+        }
+        ParietalRoute::StoreOnly => {
+            // Always acknowledge + store; *no* heavy actions/search.
+            ingest(hip_model, context, input, TTL_DEFAULT, &source_str)
+                .map_err(SmieError::Other)?;
+            if ALWAYS_ACK_STORE {
+                println!("(stored)");
             }
-            ParietalRoute::Suppress => {
-                println!("🧠 Suppressed: '{input}'");
+            // Early return so the caller doesn’t go to PFC.
+            return Ok((salience, ParietalRoute::StoreOnly));
+        }
+        ParietalRoute::Suppress => {
+            // New behavior: still *say something*; optionally keep a short-lived trace.
+            if ALWAYS_ACK_SUPPRESS {
+                eprintln!("(noted)");
             }
+            // If you want a tiny memory of low-drive turns, keep it with a short TTL:
+            // (comment this out if you don't want *any* side effects)
+            ingest(hip_model, context, input, TTL_SUPPRESSED, &source_str)
+                .map_err(SmieError::Other)?;
+            // Early return; don't escalate to PFC.
+            return Ok((salience, ParietalRoute::Suppress));
         }
     }
 
     Ok((salience, route))
-}
-
-/// Legacy helper returning just the scalar salience.
-pub fn handle_input_with_thalamus_legacy(
-    context: &str,
-    input: &str,
-    source: &InputType,
-    drives: &HashMap<String, SyntheticDrive>,
-) -> Result<f32, SmieError> {
-    let (salience, _route) = handle_input_with_thalamus(context, input, source, drives)?;
-    Ok(salience.final_weight)
 }

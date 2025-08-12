@@ -15,6 +15,7 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "eframe",
+ "faiss",
  "faiss-sys",
  "lz4",
  "ndarray 0.15.6",
@@ -28,6 +29,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "zstd 0.13.3",
 ]
 
@@ -733,7 +735,7 @@ dependencies = [
  "bitflags 2.9.1",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -2821,6 +2823,15 @@ dependencies = [
  "rayon-core",
  "smallvec",
  "zune-inflate",
+]
+
+[[package]]
+name = "faiss"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3ffe048432786028b0a30aa1d13e10e08ced380439ba4a83fe5c227d2dd9733"
+dependencies = [
+ "faiss-sys",
 ]
 
 [[package]]

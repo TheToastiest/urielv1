@@ -21,7 +21,7 @@ pub struct DriveDef {
 pub static PRIMORDIAL_BLOB: &[u8] = include_bytes!("primordial.json"); // keep committed to repo
 
 // 2) Canonical SHA-256 of the blob, also compiled into the binary
-pub const PRIMORDIAL_SHA256: &str = "REPLACE_WITH_ACTUAL_SHA256_OF_JSON";
+pub const PRIMORDIAL_SHA256: &str = "6d996b50b0d830c11ce0ac2181bf0e7d7abe15bb8b9a1bf7aa61709be1ab7729";
 
 // 3) Parsed, validated, ready-to-use singleton
 pub static PRIMORDIAL: Lazy<Primordial> = Lazy::new(|| {

@@ -106,3 +106,12 @@ impl ForwardProcessor {
         }
     }
 }
+// src/callosum/event.rs
+
+
+pub mod test_support {
+    #[derive(Clone, Debug)]
+    pub struct TestDynPayload {
+        pub val: i32,
+    }
+}

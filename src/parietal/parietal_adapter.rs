@@ -1,8 +1,8 @@
 // src/Adapters/parietal_adapter.rs
 use std::{collections::HashMap, sync::Arc, thread};
 use crate::Microthalamus::microthalamus::SyntheticDrive;
-use crate::parietal::parietal::{evaluate_input, ParietalRoute};
-use crate::parietal::route_cfg::RouteCfg; // if you prefer decide_route_with_cfg, swap it in
+use super::parietal::{evaluate_input, ParietalRoute};
+use super::route_cfg::RouteCfg; // if you prefer decide_route_with_cfg, swap it in
 use crate::callosum::callosum::CorpusCallosum;
 use crate::callosum::event::{CallosumEvent};
 use crate::callosum::payloads::{RouteDecision, StoreRequest, RetrieveRequest};
