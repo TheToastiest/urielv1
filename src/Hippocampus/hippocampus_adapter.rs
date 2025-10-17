@@ -11,7 +11,7 @@ use crate::PFC::context_retriever::ContextRetriever;
 
 pub fn spawn_hippocampus_adapter(
     cc: Arc<CorpusCallosum>,
-    retriever: Arc<ContextRetriever>,
+    _retriever: Arc<ContextRetriever>,
     name: &str,
 ) {
     let rx = cc.subscribe(name);

@@ -3,9 +3,9 @@ name = "URIELV1"
 version = "1.0.0"
 edition = "2021"
 
-#[[bin]]
-#name = "uriel_ui"
-#path = "src/URIEL_UI.rs"
+[[bin]]
+name = "uriel_ui"
+path = "src/URIEL_UI.rs"
 
 #[[bin]]
 #name = "smie_test"
@@ -26,6 +26,7 @@ path = "src/lib.rs"
 test_support = []
 
 [dependencies]
+fxhash = "0.2.1"
 ctrlc = "3"
 smie_core = { git = "https://github.com/TheToastiest/smie_core", features = ["ra"] }
 thiserror = "2.0.17"
@@ -55,3 +56,4 @@ anyhow = "1.0.98"
 once_cell = "1.21.3"
 sha2 = "0.10.9"
 faiss = "0.12.1"
+bytemuck = "1.23.2"

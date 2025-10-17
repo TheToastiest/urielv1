@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 pub fn spawn_cortex_adapter(
     cc: Arc<CorpusCallosum>,
-    retriever: Arc<ContextRetriever>,
+    _retriever: Arc<ContextRetriever>,
     drives: Arc<HashMap<String, SyntheticDrive>>,
     name: &str,
 ) {

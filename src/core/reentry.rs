@@ -34,11 +34,11 @@ impl<'a> ReentryEngine<'a> {
         cfg: ReentryCfg,
     ) -> String {
         // 0) Primordial must exist (touch to ensure it’s loaded)
-        let p = primordial();
+        let _p = primordial();
         let start = Instant::now();
 
         // 1) Perception/parietal
-        let (score, route) = evaluate_input(input_text, self.drives);
+        let (score, _route) = evaluate_input(input_text, self.drives);
 
         self.publish("parietal", None, CallosumEvent::EvaluatedInput {
             input: input_text.to_string(),

@@ -15,7 +15,7 @@ fn now_ms() -> i64 {
 pub fn spawn_parietal_adapter(
     cc: Arc<CorpusCallosum>,
     drives: Arc<HashMap<String, SyntheticDrive>>,
-    route_cfg: RouteCfg,        // not used in this minimal demo, but keep if you have heuristics
+    _route_cfg: RouteCfg,        // not used in this minimal demo, but keep if you have heuristics
     name: &str,
     context_key: String,        // “default” or session id
 ) {

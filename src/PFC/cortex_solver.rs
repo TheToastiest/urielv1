@@ -177,7 +177,7 @@ fn extract_value_near_needle(sentence: &str, needle_lc: &str) -> Option<String> 
     let markers = [" is ", " are ", " = ", ": "];
 
     // Look in the tail starting at the needle
-    let tail = &s[npos..];
+    let _tail = &s[npos..];
     let tail_lc = &s_lc[npos..];
 
     // Find the first marker in the tail

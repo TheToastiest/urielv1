@@ -10,6 +10,9 @@ pub mod core;
 pub mod Inference;
 pub mod Learning;
 pub mod Frontal;
+pub mod policy;
+
+pub mod concepts_and_contexts;
 
 pub use crate::parietal::{SalienceScore, ParietalRoute};
 //pub use Hippocampus::pipeline::{store_embedding_sqlite,load_embedding_sqlite};

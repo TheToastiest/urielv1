@@ -1,801 +1,376 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+// src/URIEL_UI.rs
+use std::cmp::Ordering;
+use std::io;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use burn::tensor::backend::Backend;
+use burn_ndarray::NdArray;
+
+use eframe::egui;
+
+use URIELV1::Hippocampus::infer::HippocampusModel;
+use URIELV1::Hippocampus::pipeline;                         // durability ingest
+use URIELV1::Hippocampus::sqlite_backend::recall_latest;     // fact fallback
+
+use URIELV1::Microthalamus::microthalamus::{MicroThalamus, SyntheticDrive};
+use URIELV1::Microthalamus::goal::{Ctx, Goal, GoalStatus};
+
+use smie_core::{Embedder, Smie, SmieConfig, Metric, tags};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use eframe::egui;
-use URIELV1::Parietal::parietal::InputType;
-use URIELV1::core::core::{InferenceEngine, InferenceInput, Evidence};
-use URIELV1::Inference::inference::{RuleCfg, RuleEngine};
-use URIELV1::Frontal::frontal::{evaluate_frontal_control, FrontalContext, FrontalDecision};
-use URIELV1::Hippocampus::burn_model::MyBackend;
-use URIELV1::Hippocampus::embedding::{generate_embedding, store_embedding};
-use URIELV1::Hippocampus::ingest; // ⟵ keep UI ingest
-use URIELV1::Hippocampus::primordial::primordial;
-use URIELV1::Hippocampus::redis_backend::{cache_entry, get_recent_keys};
-use URIELV1::Hippocampus::sqlite_backend::{recall_all, store_entry, SemanticMemoryEntry};
-use URIELV1::Microthalamus::goal::{Ctx, Goal, GoalStatus};
-use URIELV1::Microthalamus::microthalamus::{MicroThalamus, SyntheticDrive};
-use URIELV1::PFC::cortex::{execute_cortex, CortexAction, CortexInputFrame, CortexOutput};
-use URIELV1::PFC::context_retriever::{
-    ContextRetriever, Embedding, Embeddings, MemoryHit, RetrieverCfg, VectorStore,
-};
-use URIELV1::Parietal::parietal::{ParietalRoute, SalienceScore};
-use URIELV1::Temporal::temporal::{parse_phrase, ParsedCommand};
-use URIELV1::embedder::embedder::FixedWeightEmbedder;
-use URIELV1::Parietal::parietal::{handle_input_with_thalamus_legacy};
-use smie_core::{Smie, SmieConfig, HashEmbed, Metric, tags};
-use std::error::Error;
-use URIELV1::PFC::context_retriever::{VectorStore, Embedding, MemoryHit};
-#[derive(Default)]
+use regex::Regex;
+
+// -------------------------- small helpers --------------------------
+fn sanitize_input(s: &str) -> String {
+    let mut t = s.trim();
+    while let Some(c) = t.chars().next() {
+        if c == '>' || c == '•' || c == '-' || c == '|' { t = t[1..].trim_start(); } else { break; }
+    }
+    t.to_string()
+}
+fn is_question(s: &str) -> bool {
+    let l = s.trim().to_ascii_lowercase();
+    l.ends_with('?') || l.starts_with("what ") || l.starts_with("who ")
+        || l.starts_with("where ") || l.starts_with("why ") || l.starts_with("how ")
+}
+fn normalize_question(q: &str) -> String {
+    let l = q.trim().to_ascii_lowercase();
+    if l.starts_with("what is your name") { return "your name is".into(); }
+    if l.starts_with("what is the launch code") { return "the launch code is".into(); }
+    q.to_string()
+}
+fn concept_hint_from_norm(qn: &str) -> Option<&'static str> {
+    if qn.starts_with("your name is") { Some("name") }
+    else if qn.starts_with("the launch code is") { Some("launch code") }
+    else { None }
+}
+fn extract_answer(qn: &str, text: &str) -> Option<String> {
+    let tl = text.trim();
+    let ll = tl.to_ascii_lowercase();
+    if qn.starts_with("your name is") || ll.contains("your name is") || ll.contains("name is") {
+        if let Some(idx) = ll.find("name is") {
+            let ans = tl[idx + "name is".len()..]
+                .trim()
+                .trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace());
+            if !ans.is_empty() { return Some(ans.to_string()); }
+        }
+    }
+    if qn.starts_with("the launch code is") || ll.contains("launch code") {
+        let re = Regex::new(r"(\d{3}[-\s]?\d{3}[-\s]?\d{3})").ok()?;
+        if let Some(c) = re.captures(tl) { return Some(c.get(1).unwrap().as_str().to_string()); }
+    }
+    None
+}
+fn choose_best_for(qn: &str, mut hits: Vec<(u64, f32, u64, String)>) -> Option<(u64, f32, u64, String)> {
+    let key = if qn.starts_with("your name is") { "name" }
+    else if qn.starts_with("the launch code is") { "launch code" }
+    else { "" };
+    hits.sort_by(|a, b| {
+        let ab = b.3.to_ascii_lowercase().contains(key) as u8;
+        let aa = a.3.to_ascii_lowercase().contains(key) as u8;
+        ab.cmp(&aa)               // prefer containing key
+            .then_with(|| b.0.cmp(&a.0)) // prefer NEWER id
+            .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal))
+    });
+    hits.into_iter().next()
+}
+fn concept_of(text: &str) -> Option<&'static str> {
+    let l = text.to_ascii_lowercase();
+    if l.starts_with("the launch code is") || l.contains("launch code") { return Some("launch code"); }
+    if l.starts_with("your name is") || l.contains("your name is") || l.contains("name is") { return Some("name"); }
+    None
+}
+fn fmt_tags(t: u64) -> String {
+    let mut v = Vec::new();
+    if t & tags::USER   != 0 { v.push("USER"); }
+    if t & tags::SYSTEM != 0 { v.push("SYSTEM"); }
+    if t & tags::SHORT  != 0 { v.push("SHORT"); }
+    if t & tags::LONG   != 0 { v.push("LONG"); }
+    if v.is_empty() { "NONE".into() } else { v.join("|") }
+}
+
+// -------------------------- Embedders --------------------------
+
+// PFC-style embedder (if you later hook PFC to UI)
+struct ModelEmb<B: Backend> { model: Arc<Mutex<HippocampusModel<B>>> }
+impl<B: Backend> ModelEmb<B> { fn new(model: Arc<Mutex<HippocampusModel<B>>>) -> Self { Self { model } } }
+impl<B: Backend> URIELV1::PFC::context_retriever::Embeddings for ModelEmb<B> {
+    fn embed(&self, text: &str) -> Result<URIELV1::PFC::context_retriever::Embedding, Box<dyn std::error::Error + Send + Sync>> {
+        let model = self.model.lock()
+            .map_err(|_| Box::<dyn std::error::Error + Send + Sync>::from(io::Error::new(io::ErrorKind::Other, "model lock poisoned")))?;
+        let z = model.run_inference(text);
+        let mut v = z.to_data().as_slice::<f32>()
+            .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(io::Error::new(io::ErrorKind::Other, format!("{e:?}"))))?
+            .to_vec();
+        let n = (v.iter().map(|x| x * x).sum::<f32>()).sqrt().max(1e-6);
+        for x in &mut v { *x /= n; }
+        Ok(v)
+    }
+}
+
+// SMIE index embedder
+struct SmieHippEmbed<B: Backend> { model: Arc<Mutex<HippocampusModel<B>>>, dim: usize }
+impl<B: Backend> SmieHippEmbed<B> {
+    fn new(model: Arc<Mutex<HippocampusModel<B>>>) -> anyhow::Result<Self> {
+        let m = model.lock().map_err(|_| anyhow::anyhow!("model lock poisoned"))?;
+        let z = m.run_inference("[dim-probe]");
+        let dim = z.to_data().as_slice::<f32>().map_err(|e| anyhow::anyhow!("{e:?}"))?.len();
+        drop(m);
+        Ok(Self { model, dim })
+    }
+}
+impl<B: Backend> Embedder for SmieHippEmbed<B> {
+    fn dim(&self) -> usize { self.dim }
+    fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        let m = self.model.lock().map_err(|_| anyhow::anyhow!("model lock poisoned"))?;
+        let z = m.run_inference(text);
+        let mut v = z.to_data().as_slice::<f32>().map_err(|e| anyhow::anyhow!("{e:?}"))?.to_vec();
+        drop(m);
+        let n = (v.iter().map(|x| x * x).sum::<f32>()).sqrt().max(1e-6);
+        for x in &mut v { *x /= n; }
+        Ok(v)
+    }
+}
+
+// -------------------------- App state --------------------------
+type Bx = NdArray<f32>;
+
 struct AppState {
-    input_text: String,
-    recall_results: Vec<SemanticMemoryEntry>,
-    output_log: Vec<String>,
-    thalamus: Option<MicroThalamus>,
-    device: <MyBackend as burn::tensor::backend::Backend>::Device,
-    embedder: Option<FixedWeightEmbedder<MyBackend>>,
-    last_response: Option<CortexOutput>,
+    smie: Arc<Smie>,
+    model: Arc<Mutex<HippocampusModel<Bx>>>,
+    thalamus: MicroThalamus,
+    goal_rx: Receiver<Goal>,
+    drives: std::collections::HashMap<String, SyntheticDrive>,
     goals: Vec<Goal>,
-    cortex_tx: Option<Sender<Goal>>,
-    cortex_rx: Option<Receiver<Goal>>,
-    retriever: Option<Arc<ContextRetriever>>, // <-- holds the retriever
-    smie: Option<Arc<Smie>>,
 
+    // UI
+    input_text: String,
+    query_text: String,
+    top_k: usize,
+    set_user: bool,
+    set_system: bool,
+    set_short: bool,
+    set_long: bool,
+
+    results: Vec<(u64, f32, u64, String)>,
+    status: String,
 }
 
-fn push_goal(
-    state: &mut AppState,
-    mut g: Goal,
-    drives: &HashMap<String, SyntheticDrive>,
-    ctx: &Ctx,
-) {
-    let drive_vec: HashMap<String, f32> =
-        drives.iter().map(|(k, v)| (k.clone(), v.weight)).collect();
-    g.score(&drive_vec, ctx);
-    state.goals.push(g);
-}
+impl AppState {
+    fn new(smie: Arc<Smie>, model: Arc<Mutex<HippocampusModel<Bx>>>) -> Self {
+        // thalamus
+        let (tx, rx) = unbounded::<Goal>();
+        let mut th = MicroThalamus::new(tx);
+        th.register_drive(SyntheticDrive::new(
+            "Curiosity", 0.25, 0.01, Duration::from_secs(3), 0.5,
+            "drive:curiosity", vec![0.1,0.2,0.3,0.0,0.1,0.4,0.1,0.2],
+        ));
+        th.register_drive(SyntheticDrive::new(
+            "ResolveConflict", 0.35, 0.01, Duration::from_secs(5), 1.0,
+            "drive:resolveconflict", vec![0.1,0.2,0.3,0.0,0.1,0.4,0.1,0.2],
+        ));
 
-fn rescore_goals(state: &mut AppState, drives: &HashMap<String, SyntheticDrive>, ctx: &Ctx) {
-    let drive_vec: HashMap<String, f32> =
-        drives.iter().map(|(k, v)| (k.clone(), v.weight)).collect();
-    for g in &mut state.goals {
-        g.score(&drive_vec, ctx);
+        Self {
+            smie,
+            model,
+            thalamus: th,
+            goal_rx: rx,
+            drives: Default::default(),
+            goals: Vec::new(),
+
+            input_text: String::new(),
+            query_text: String::new(),
+            top_k: 5,
+            set_user: true,
+            set_system: false,
+            set_short: true,
+            set_long: false,
+
+            results: Vec::new(),
+            status: String::new(),
+        }
     }
-    state.goals.sort_by(|a, b| {
-        b.last_score
-            .partial_cmp(&a.last_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    state.goals.retain(|g| {
-        !matches!(
-            g.status,
-            GoalStatus::Succeeded | GoalStatus::Failed | GoalStatus::Aborted
-        )
-    });
 }
 
-fn main() -> Result<(), eframe::Error> {
-    // --- SMIE (raggedy_anndy Flat) ---
-    let dim = 384; // must match your generate_embedding() output
-    let embedder = Arc::new(HashEmbed::new(dim));
-    let smie = Arc::new(Smie::new(SmieConfig { dim, metric: Metric::Cosine }, embedder)
-        .expect("SMIE init failed"));
-    let _ = smie.load("data/uriel"); // optional metadata load
+// -------------------------- UI entry --------------------------
+pub fn main() -> Result<(), eframe::Error> {
+    // init model + SMIE (same as runtime)
+    let device = <Bx as Backend>::Device::default();
+    let model = Arc::new(Mutex::new(HippocampusModel::<Bx>::load_or_init(
+        &device,
+        "R:/uriel/models/checkpoints/uriel_encoder_step008500.bin",
+    )));
+    let smie_embedder = Arc::new(SmieHippEmbed::new(model.clone()).expect("smie embed init"));
+    let smie = Arc::new(Smie::new(
+        SmieConfig { dim: smie_embedder.dim(), metric: Metric::Cosine },
+        smie_embedder,
+    ).expect("smie init"));
 
-    {
-        let mut st = app_state.borrow_mut();
-        st.smie = Some(smie.clone());
-        // ... (your existing thalamus/device/embedder/goal init continues)
+    std::fs::create_dir_all("data").ok();
+    let _ = smie.load("data/uriel");
 
-        // Optional: background scanner if you expose one at crate root
-        if let Err(e) = URIELV1::start_scanner() {
-            eprintln!("Failed to start scanner: {e}");
-        }
+    let mut state = AppState::new(smie.clone(), model.clone());
 
-        // 🔹 Primordial seeding — CACHE + PERSIST + EMBED (UI kept)
-        println!("⏳ Primordial Memory Being Inserted:");
-        for (ctx, data, ttl) in primordial() {
-            let _ = cache_entry(ctx, data, ttl);
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let _ = store_entry(ctx, data, Some(timestamp));
-            if let Ok(embedding_vec) = generate_embedding(data) {
-                let _ = store_embedding(ctx, &embedding_vec);
+    let options = eframe::NativeOptions::default();
+    eframe::run_simple_native("URIEL UI", options, move |ctx, _frame| {
+        // tick thalamus (basic)
+        state.thalamus.tick();
+        state.drives = state.thalamus.drives.clone();
+
+        // drain goals from thalamus
+        let mut new_goals = Vec::new();
+        while let Ok(g) = state.goal_rx.try_recv() { new_goals.push(g); }
+        if !new_goals.is_empty() {
+            let goal_ctx = Ctx { signals: [("weight".into(), 0.35)].into_iter().collect() };
+            for g in new_goals {
+                let w = state.drives.iter().map(|(k,d)| (k.clone(), d.weight)).collect();
+                let mut g2 = g;
+                g2.score(&w, &goal_ctx);
+                state.goals.push(g2);
             }
+            state.goals.sort_by(|a,b| b.last_score.partial_cmp(&a.last_score).unwrap_or(Ordering::Equal));
         }
-        println!(
-            "🔍 Keys in Redis: {:?}",
-            get_recent_keys("smie:").unwrap_or_default()
-        );
 
-        // 🔹 App state
-        let app_state = Rc::new(RefCell::new(AppState::default()));
-        {
-            let (ctx_tx, ctx_rx) = unbounded::<Goal>();
-            let mut thalamus = MicroThalamus::new(ctx_tx.clone());
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("URIEL UI — SMIE + MicroThalamus");
+            ui.separator();
 
-            thalamus.register_drive(SyntheticDrive::new(
-                "Curiosity",
-                0.2,
-                0.01,
-                Duration::from_secs(3),
-                0.5,
-                "drive:curiosity",
-                vec![0.1, 0.2, 0.3, 0.0, 0.1, 0.4, 0.1, 0.2],
-            ));
-            thalamus.register_drive(SyntheticDrive::new(
-                "ResolveConflict",
-                0.3,
-                0.01,
-                Duration::from_secs(5),
-                1.0,
-                "drive:resolveconflict",
-                vec![0.1, 0.2, 0.3, 0.0, 0.1, 0.4, 0.1, 0.2],
-            ));
-
-            let mut st = app_state.borrow_mut();
-            st.thalamus = Some(thalamus);
-            st.device = Default::default();
-            st.embedder = Some(FixedWeightEmbedder::new_with_seed(32, 64, 1337, &st.device));
-            st.goals = Vec::new();
-            st.cortex_tx = Some(ctx_tx);
-            st.cortex_rx = Some(ctx_rx);
-
-            // -------------------- RETRIEVER INIT --------------------
-            // Adapters are defined at the bottom of this file.
-            // OLD:
-            // let vs = Arc::new(UiSqliteVectorStore { contexts: vec!["ui_context".to_string(), "primordial".to_string()], max_scan: 512 });
-
-            // NEW:
-            let vs = Arc::new(UiSmieVectorStore {
-                smie: smie.clone(),
-                contexts: vec!["ui_context".to_string(), "primordial".to_string()],
-                mask: tags::USER | tags::SYSTEM | tags::SHORT | tags::LONG,
+            // Drives + Goals (compact readout)
+            ui.horizontal(|ui| {
+                ui.label("Drives:");
+                for (k,d) in &state.drives { ui.monospace(format!("{k}:{:.2}  ", d.weight)); }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Goals:");
+                if state.goals.is_empty() { ui.monospace("(none)"); }
+                else {
+                    for g in &state.goals { ui.monospace(format!("{}[{:.2}]  ", g.label, g.last_score)); }
+                }
             });
 
-            let emb = Arc::new(UiEmbeddings {}); // keep your embedder adapter
-            let retr = Arc::new(ContextRetriever::new(
-                vs,
-                emb,
-                None,
-                RetrieverCfg::default(),
-            ));
-            st.retriever = Some(retr);
+            ui.separator();
+            ui.label("Ingest memory:");
+            ui.text_edit_singleline(&mut state.input_text);
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut state.set_user, "USER");
+                ui.checkbox(&mut state.set_system, "SYSTEM");
+                ui.checkbox(&mut state.set_short, "SHORT");
+                ui.checkbox(&mut state.set_long, "LONG");
 
-            let emb = Arc::new(UiEmbeddings {});
-            let retr = Arc::new(ContextRetriever::new(
-                vs,
-                emb,
-                None,                   // no embedding cache yet
-                RetrieverCfg::default(), // min_score/topk defaults
-            ));
-            st.retriever = Some(retr);
-            // --------------------------------------------------------
-        }
-
-        let app_state_clone = app_state.clone();
-        let options = eframe::NativeOptions::default();
-
-        eframe::run_simple_native("SMIE UI", options, move |ctx, _frame| {
-            let mut state = app_state_clone.borrow_mut();
-
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.heading("SMIE — Semantic Memory Ingestion Engine");
-                ui.separator();
-
-                // 🔹 Working set
-                ui.heading("Working Set");
-                ui.horizontal(|ui| {
-                    ui.label("🎯 Active goals:");
-                    if state.goals.is_empty() {
-                        ui.label("—");
+                if ui.button("📥 Ingest").clicked() {
+                    let text = sanitize_input(&state.input_text);
+                    if text.is_empty() {
+                        state.status = "⚠️ Nothing to ingest".into();
                     } else {
-                        for g in &state.goals {
-                            ui.monospace(format!(
-                                "{} [{:.2}] {:?}",
-                                g.label, g.last_score, g.status
-                            ));
+                        // durability
+                        if let Ok(model) = state.model.lock() {
+                            let _ = pipeline::ingest(&*model, "ui_context", &text, 30, "gui");
+                        }
+                        // upsert in SMIE for single-truths
+                        if let Some(con) = concept_of(&text) {
+                            let mask = tags::SHORT | tags::LONG | tags::SYSTEM | tags::USER;
+                            if let Ok(old) = state.smie.recall(con, 32, mask) {
+                                for (id, _s, _t, txt) in old {
+                                    if concept_of(&txt) == Some(con) { let _ = state.smie.tombstone(id); }
+                                }
+                            }
+                        }
+                        // tags
+                        let mut tbits = 0u64;
+                        if state.set_user   { tbits |= tags::USER; }
+                        if state.set_system { tbits |= tags::SYSTEM; }
+                        if state.set_short  { tbits |= tags::SHORT; }
+                        if state.set_long   { tbits |= tags::LONG; }
+
+                        match state.smie.ingest(&text, tbits) {
+                            Ok(id) => { state.status = format!("✅ Ingested id {id} [{}]", fmt_tags(tbits)); state.input_text.clear(); }
+                            Err(e) => { state.status = format!("❌ SMIE ingest failed: {e}"); }
                         }
                     }
-                });
-
-                if let Some(resp) = &state.last_response {
-                    match resp {
-                        CortexOutput::VerbalResponse(t) => {
-                            ui.label(format!("🧩 Last response: {}", t));
-                        }
-                        CortexOutput::Action(a) => match a {
-                            CortexAction::ScanItem => {
-                                ui.label("🛠️ Last action: ScanItem");
-                            }
-                            CortexAction::ScanEnvironment => {
-                                ui.label("🛠️ Last action: ScanEnvironment");
-                            }
-                            CortexAction::SearchInternet(q) => {
-                                ui.label(format!("🛠️ Last action: SearchInternet({q})"));
-                            }
-                            CortexAction::RunSubmodule(name) => {
-                                ui.label(format!("🛠️ Last action: RunSubmodule({name})"));
-                            }
-                        },
-                        CortexOutput::Thought(t) => {
-                            ui.label(format!("💭 Last thought: {}", t));
-                        }
-                        CortexOutput::Multi(list) => {
-                            ui.label(format!("🧩 Multi-output ({} items)", list.len()));
-                        }
-                    };
                 }
+            });
 
-                ui.separator();
-                // 🔹 Ingest text memory (UI preserved)
-                ui.label("Enter memory data:");
-                ui.text_edit_singleline(&mut state.input_text);
+            ui.separator();
+            ui.label("Recall:");
+            ui.text_edit_singleline(&mut state.query_text);
+            ui.horizontal(|ui| {
+                ui.label("Top K:");
+                ui.add(egui::Slider::new(&mut state.top_k, 1..=20));
+                if ui.button("🔎 Recall").clicked() {
+                    let q = sanitize_input(&state.query_text);
+                    state.results.clear();
+                    state.status.clear();
 
-                if ui.button("Ingest").clicked() {
-                    let context = "ui_context".to_string();
-                    let data = state.input_text.clone();
-                    if data.is_empty() {
-                        state.output_log.push("⚠️ No input text.".into());
+                    if q.is_empty() {
+                        state.status = "⚠️ Empty query".into();
                     } else {
-                        // Thalamus + Parietal evaluation
-                        let drives_map = state
-                            .thalamus
-                            .as_ref()
-                            .map(|t| t.drives.clone())
-                            .unwrap_or_default();
-                        match handle_input_with_thalamus_legacy(&context, &data, &InputType::Text, &drives_map)
-                        {
-                            Ok((salience, route)) => {
-                                state.output_log.push(format!(
-                                    "🧠 Salience: urgency {:.2}, familiarity {:.2}, understanding {:.2}, drive {:.2}, final {:.2}",
-                                    salience.urgency,
-                                    salience.familiarity,
-                                    salience.understanding,
-                                    salience.drive_alignment,
-                                    salience.final_weight
-                                ));
-                                state.output_log.push(format!("🧭 Route: {:?}", route));
+                        // SMIE-first multiprobe
+                        let qn = normalize_question(&q);
+                        let mut probes: Vec<String> = vec![qn.clone()];
+                        if let Some(key) = concept_hint_from_norm(&qn) { probes.push(key.into()); }
+                        probes.push(q.clone());
 
-                                if salience.final_weight < 0.2 {
-                                    state.output_log.push(
-                                        "🔇 Thalamus deprioritized this input.".into(),
-                                    );
-                                    state.input_text.clear();
-                                    return;
-                                }
+                        let mask = tags::SHORT | tags::LONG | tags::SYSTEM | tags::USER;
+                        let mut answered = None::<String>;
 
-                                match route {
-                                    ParietalRoute::Suppress => {
-                                        state.output_log.push("🔇 Parietal routed: Suppress".into());
-                                        state.input_text.clear();
-                                        return;
-                                    }
-                                    ParietalRoute::StoreOnly => {
-                                        state.output_log.push("🗃️ Parietal routed: StoreOnly".into());
-                                    }
-                                    ParietalRoute::Respond => {
-                                        state.output_log.push("✅ Parietal routed: Respond".into());
-
-                                        let drives_snapshot: HashMap<String, SyntheticDrive> = state
-                                            .thalamus
-                                            .as_ref()
-                                            .map(|t| t.drives.clone())
-                                            .unwrap_or_default();
-
-                                        let frame = CortexInputFrame {
-                                            raw_input: &data,
-                                            score: salience.clone(),
-                                            drives: &drives_snapshot,
-                                        };
-
-                                        // ⬇️ Borrow the retriever from state
-                                        let retr = state
-                                            .retriever
-                                            .as_ref()
-                                            .expect("ContextRetriever not initialized");
-                                        let cortex_out = execute_cortex(frame, retr);
-                                        let engine = RuleEngine::new(RuleCfg::default());
-
-                                        // later, after you have retrieval hits
-                                        // — Build inputs for the inference engine —
-                                        let raw_input = &data;
-
-                                        // drives: HashMap<String, f32> from your SyntheticDrive snapshot
-                                        let drives: HashMap<String, f32> = drives_snapshot
-                                            .iter()
-                                            .map(|(k, v)| (k.clone(), v.weight))
-                                            .collect();
-
-                                        // grab top-k evidence from SQLite across the contexts you care about
-                                        let mapped_hits = build_evidence_for_inference(
-                                            raw_input,
-                                            &["ui_context", "primordial"], // add more contexts if you like
-                                            256,                           // scan up to N recent rows / context
-                                            8,                             // top-k
-                                        );
-
-                                        // inference → decision
-                                        let inp = InferenceInput { raw_input, drives, hits: mapped_hits };
-                                        let dec = engine.infer(&inp);
-                                        let proposed = map_decision_to_cortex(&dec, &data, &inp.hits);
-
-                                        // (for now) log what it chose; you can wire this into Frontal if you want
-                                        state.output_log.push(format!("🤖 Inference: {:?} (conf {:.2})", dec.action, dec.confidence));
-                                        state.output_log.push(format!("🔎 Evidence used: {:?}", dec.chosen_ids));
-                                        state.output_log.push(format!("🪵 Why: {}", dec.rationale));
-                                        let dec = engine.infer(&inp);           // -> InferenceDecision
-                                        let goal_ctx = Ctx {
-                                            signals: [
-                                                ("urgency".into(), salience.urgency),
-                                                ("familiarity".into(), salience.familiarity),
-                                                ("understanding".into(), salience.understanding),
-                                                ("drive".into(), salience.drive_alignment),
-                                                ("weight".into(), salience.final_weight),
-                                            ]
-                                                .into_iter()
-                                                .collect(),
-                                        };
-
-                                        // drain async goals from MicroThalamus → UI without immutable borrow during mutation
-                                        let pending_goals: Vec<Goal> =
-                                            if let Some(rx_ref) = state.cortex_rx.as_ref() {
-                                                let rx = rx_ref.clone();
-                                                let mut v = Vec::new();
-                                                while let Ok(g) = rx.try_recv() {
-                                                    v.push(g);
-                                                }
-                                                v
-                                            } else {
-                                                Vec::new()
-                                            };
-                                        for g in pending_goals {
-                                            push_goal(&mut state, g, &drives_snapshot, &goal_ctx);
-                                            state
-                                                .output_log
-                                                .push("🎯 New goal from Thalamus".into());
-                                        }
-
-                                        let fctx = FrontalContext {
-                                            active_goals: state
-                                                .goals
-                                                .iter()
-                                                .map(|g| g.label.clone())
-                                                .collect(),
-                                            current_drive_weights: &drives_snapshot,
-                                            last_response: state.last_response.as_ref(),
-                                        };
-
-                                        match evaluate_frontal_control(&proposed, &fctx) {
-                                            FrontalDecision::ExecuteImmediately(out) => {
-                                                match &out {
-                                                    CortexOutput::VerbalResponse(text) => {
-                                                        ui.label(format!("🧩 Response: {}", text));
-                                                    }
-                                                    CortexOutput::Action(a) => match a {
-                                                        CortexAction::ScanItem => {
-                                                            ui.label("🛠️ Action: ScanItem");
-                                                        }
-                                                        CortexAction::ScanEnvironment => {
-                                                            ui.label("🛠️ Action: ScanEnvironment");
-                                                        }
-                                                        CortexAction::SearchInternet(q) => {
-                                                            ui.label(format!(
-                                                                "🛠️ Action: SearchInternet({q})"
-                                                            ));
-                                                        }
-                                                        CortexAction::RunSubmodule(name) => {
-                                                            ui.label(format!(
-                                                                "🛠️ Action: RunSubmodule({name})"
-                                                            ));
-                                                        }
-                                                    },
-                                                    CortexOutput::Thought(t) => {
-                                                        ui.label(format!("💭 Thought: {}", t));
-                                                    }
-                                                    CortexOutput::Multi(list) => {
-                                                        ui.label(format!(
-                                                            "🧩 Multi-output ({} items)",
-                                                            list.len()
-                                                        ));
-                                                    }
-                                                };
-                                                state.last_response = Some(out);
-                                            }
-                                            FrontalDecision::QueueForLater(out) => {
-                                                state.output_log.push("⏳ Queued response.".into());
-                                                state.last_response = Some(out);
-                                            }
-                                            FrontalDecision::SuppressResponse(reason) => {
-                                                state.output_log
-                                                    .push(format!("🔇 Suppressed: {reason}"));
-                                            }
-                                            FrontalDecision::ReplaceWithGoal(goal_text) => {
-                                                let gid = (state.goals.len() as u64) + 1;
-                                                let label = goal_text.clone();
-                                                let g = Goal::new(
-                                                    gid,
-                                                    label,
-                                                    |dr, ctx| {
-                                                        let c = *dr.get("Curiosity").unwrap_or(&0.0);
-                                                        let r =
-                                                            *dr.get("ResolveConflict").unwrap_or(&0.0);
-                                                        (c * 0.6 + r * 0.4)
-                                                            * (ctx.signals
-                                                            .get("weight")
-                                                            .copied()
-                                                            .unwrap_or(0.2)
-                                                            + 0.1)
-                                                    },
-                                                    |ctx| {
-                                                        ctx.signals
-                                                            .get("conflict")
-                                                            .copied()
-                                                            .unwrap_or(1.0)
-                                                            < 0.1
-                                                    },
-                                                )
-                                                    .with_decay(0.02);
-
-                                                push_goal(&mut state, g, &drives_snapshot, &goal_ctx);
-                                                state
-                                                    .output_log
-                                                    .push(format!("🎯 Goal queued: {}", goal_text));
-                                            }
-                                        }
-
-                                        if let Some(thalamus) = state.thalamus.as_mut() {
-                                            thalamus.inject_stimulus(&context, &data);
-                                            thalamus.tick();
-                                            let logs: Vec<String> = thalamus
-                                                .drives
-                                                .iter()
-                                                .map(|(name, d)| {
-                                                    format!(
-                                                        "🧠 Drive: {} → weight {:.2}",
-                                                        name, d.weight
-                                                    )
-                                                })
-                                                .collect();
-                                            state.output_log.extend(logs);
-                                        }
-
-                                        // re-score goals with snapshot & try completion
-                                        let drives_snapshot2: HashMap<String, SyntheticDrive> =
-                                            state
-                                                .thalamus
-                                                .as_ref()
-                                                .map(|t| t.drives.clone())
-                                                .unwrap_or_default();
-                                        rescore_goals(&mut state, &drives_snapshot2, &goal_ctx);
-                                        if let Some(label) = {
-                                            if let Some(top) = state.goals.first_mut() {
-                                                if top.try_finish(&goal_ctx) {
-                                                    Some(top.label.clone())
-                                                } else {
-                                                    None
-                                                }
-                                            } else {
-                                                None
-                                            }
-                                        } {
-                                            state
-                                                .output_log
-                                                .push(format!("✅ Goal succeeded: {}", label));
-                                        }
+                        for probe in probes {
+                            if let Ok(hits) = state.smie.recall(&probe, state.top_k.max(8), mask) {
+                                if !hits.is_empty() {
+                                    state.results = hits.clone();
+                                    if let Some(best) = choose_best_for(&qn, hits) {
+                                        answered = extract_answer(&qn, &best.3).or(Some(best.3));
+                                        break;
                                     }
                                 }
-
-                                // 🔹 UI-level ingest trace (explicit, beyond handle_input)
-                                let _ = ingest("ui_context".to_string(), data.clone(), 30, String::from("gui"));
-                            }
-                            Err(e) => state.output_log.push(format!("❌ Thalamus error: {}", e)),
-                        }
-                    }
-                }
-
-                // 🔹 Voice command (kept)
-                ui.separator();
-                ui.label("Simulated Voice Command:");
-                let mut voice_input = String::new();
-                ui.text_edit_singleline(&mut voice_input);
-                if ui.button("Process voice").clicked() {
-                    if !voice_input.trim().is_empty() {
-                        let known_drives = vec!["curiosity", "resolve", "conflict"];
-                        let parsed: ParsedCommand = parse_phrase(&voice_input, &known_drives);
-                        state.output_log.clear();
-                        state
-                            .output_log
-                            .push(format!("🎧 Addressed to URIEL: {}", parsed.addressed_to));
-                        if let Some(cmd) = &parsed.command {
-                            state.output_log.push(format!("🗣️ Command: {}", cmd));
-                        }
-                        if !parsed.args.is_empty() {
-                            state.output_log.push(format!("🔣 Args: {:?}", parsed.args));
-                        }
-                        for (drive, weight) in parsed.drive_alignment.iter() {
-                            state
-                                .output_log
-                                .push(format!("🧠 Drive Match: {} → {:.2}", drive, weight));
-                        }
-                        state
-                            .output_log
-                            .push(format!("⏱️ Timestamp: {}", parsed.timestamp));
-                    }
-                }
-
-                // 🔹 Recall
-                if ui.button("Recall memory").clicked() {
-                    state.recall_results.clear();
-                    state.output_log.clear();
-                    if let Ok(mut entries) = recall_all("ui_context") {
-                        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-                        state.recall_results = entries.clone();
-                        for entry in entries {
-                            state
-                                .output_log
-                                .push(format!("- [{}] {}", entry.timestamp, entry.data));
-                        }
-                    } else {
-                        ui.label("⚠️ Failed to recall UI context memory.");
-                    }
-                }
-
-                if ui.button("Recall primordials").clicked() {
-                    state.recall_results.clear();
-                    state.output_log.clear();
-                    if let Ok(mut entries) = recall_all("primordial") {
-                        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-                        state.recall_results = entries.clone();
-                        for entry in entries {
-                            state
-                                .output_log
-                                .push(format!("- [{}] {}", entry.timestamp, entry.data));
-                        }
-                    } else {
-                        ui.label("⚠️ Failed to recall primordial memory.");
-                    }
-                }
-
-                ui.separator();
-                ui.label("Recalled / Log:");
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false; 2])
-                    .max_height(300.0)
-                    .show(ui, |ui| {
-                        if state.output_log.is_empty() {
-                            ui.label("No entries found.");
-                        } else {
-                            for line in &state.output_log {
-                                ui.label(line);
                             }
                         }
-                    });
-            });
-        })
-    }
 
-    // -------------------- UI ADAPTERS FOR CONTEXT RETRIEVAL --------------------
-    use std::error::Error;
-
-    /// Cosine helper (expects unit-normalized query; we normalize items here)
-    fn cosine(a: &[f32], mut b: Vec<f32>) -> f32 {
-        // normalize b
-        let n = (b.iter().map(|x| x * x).sum::<f32>()).sqrt().max(1e-6);
-        for x in b.iter_mut() {
-            *x /= n;
-        }
-        let dot = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>();
-        dot.clamp(0.0, 1.0)
-    }
-
-    /// Embeddings adapter that wraps your generate_embedding()
-    struct UiEmbeddings;
-
-    impl Embeddings for UiEmbeddings {
-        fn embed(&self, text: &str) -> Result<Embedding, Box<dyn Error + Send + Sync>> {
-            let mut v = generate_embedding(text).map_err(|e| format!("embed error: {e}"))?;
-            // normalize to unit
-            let n = (v.iter().map(|x| x * x).sum::<f32>()).sqrt().max(1e-6);
-            for x in v.iter_mut() {
-                *x /= n;
-            }
-            Ok(v)
-        }
-    }
-    // --- Inference helpers -------------------------------------------------------
-    fn cosine_unit(a: &[f32], b: &[f32]) -> f32 {
-        let nb = (b.iter().map(|x| x * x).sum::<f32>()).sqrt().max(1e-6);
-        a.iter().zip(b.iter()).map(|(x, y)| x * (y / nb)).sum::<f32>()
-    }
-
-    /// Build Evidence for inference by scanning recent SQLite rows in given contexts.
-    fn build_evidence_for_inference(
-        query: &str,
-        contexts: &[&str],
-        max_scan: usize,
-        top_k: usize,
-    ) -> Vec<Evidence> {
-        // embed query once
-        let q_emb = match generate_embedding(query) {
-            Ok(v) => v,
-            Err(_) => return Vec::new(),
-        };
-
-        let now_s = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f32();
-
-        let mut out: Vec<Evidence> = Vec::new();
-
-        for ctx in contexts {
-            if let Ok(mut rows) = recall_all(ctx) {
-                rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp)); // newest first
-                for e in rows.into_iter().take(max_scan) {
-                    // embed each memory row (you can cache later)
-                    if let Ok(mem_emb) = generate_embedding(&e.data) {
-                        let sim = cosine_unit(&q_emb, &mem_emb);
-                        let time_delta_s = (now_s - e.timestamp as f32).max(0.0);
-
-                        out.push(Evidence {
-                            id: format!("{}:{}", ctx, e.timestamp),
-                            emb: mem_emb,
-                            cosine: sim,
-                            time_delta_s,
-                            ttl_s: 0.0, // fill if you track TTL per row
-                            // simple trust heuristic by context (tune as needed)
-                            trust: if *ctx == "primordial" { 0.7 } else { 0.5 },
-                            context_id: if *ctx == "primordial" { 1 } else { 0 },
-                            modality_id: 0, // text
-                            text: e.data,
-                        });
-                    }
-                }
-            }
-        }
-
-        // keep top-k by similarity
-        out.sort_by(|a, b| b.cosine.partial_cmp(&a.cosine).unwrap_or(std::cmp::Ordering::Equal));
-        if out.len() > top_k {
-            out.truncate(top_k);
-        }
-        out
-    }
-    // ---------------------------------------------------------------------------
-    // Choose a short snippet from evidence text
-    fn snippet(t: &str, n: usize) -> String {
-        if t.len() <= n { t.to_string() } else { format!("{}…", &t[..n]) }
-    }
-
-    // Turn an InferenceDecision into a CortexOutput you already render
-    fn map_decision_to_cortex(
-        dec: &URIELV1::core::core::InferenceDecision,
-        user_text: &str,
-        hits: &[Evidence],
-    ) -> URIELV1::PFC::cortex::CortexOutput {
-        match &dec.action {
-            // Draft a small, source-backed message
-            URIELV1::core::core::Action::Respond => {
-                let mut lines = Vec::new();
-                lines.push(format!("You said: {}", user_text));
-                if !dec.chosen_ids.is_empty() {
-                    lines.push("Evidence:".into());
-                    for id in dec.chosen_ids.iter().take(3) {
-                        if let Some(h) = hits.iter().find(|e| &e.id == id) {
-                            lines.push(format!("• [{}] {}", id, snippet(&h.text, 180)));
+                        if answered.is_none() && is_question(&q) {
+                            // DB fact fallback (latest rows)
+                            if let Ok(rows) = recall_latest("ui_context", 128) {
+                                for r in rows {
+                                    if let Some(ans) = extract_answer(&qn, &r.data) { answered = Some(ans); break; }
+                                }
+                            }
                         }
+
+                        state.status = answered.unwrap_or_else(|| "(no answer)".into());
                     }
                 }
-                URIELV1::PFC::cortex::CortexOutput::VerbalResponse(lines.join("\n"))
-            }
-            URIELV1::core::core::Action::Ask => {
-                let q = "Can you clarify what outcome you want me to achieve (and any constraints)?";
-                URIELV1::PFC::cortex::CortexOutput::VerbalResponse(q.into())
-            }
-            URIELV1::core::core::Action::StoreOnly => {
-                URIELV1::PFC::cortex::CortexOutput::Thought(
-                    "Stored for context; no immediate response.".into(),
-                )
-            }
-            URIELV1::core::core::Action::SearchInternet(q) => {
-                URIELV1::PFC::cortex::CortexOutput::Action(
-                    URIELV1::PFC::cortex::CortexAction::SearchInternet(q.clone()),
-                )
-            }
-            URIELV1::core::core::Action::RunSubmodule(name) => {
-                URIELV1::PFC::cortex::CortexOutput::Action(
-                    URIELV1::PFC::cortex::CortexAction::RunSubmodule(name.clone()),
-                )
-            }
-        }
-    }
-    struct UiSmieVectorStore {
-        smie: Arc<Smie>,
-        contexts: Vec<String>,      // filter by [ctx:...] prefix in stored text
-        mask: u64,                  // SMIE tag mask (e.g., USER|SYSTEM|SHORT|LONG)
-    }
-
-    impl VectorStore for UiSmieVectorStore {
-        fn search(
-            &self,
-            query: &Embedding,
-            top_k: usize,
-        ) -> Result<Vec<MemoryHit>, Box<dyn Error + Send + Sync>> {
-            // ask SMIE using the query vector directly
-            let mut hits = self
-                .smie
-                .recall_vec(query, top_k * 3, self.mask) // oversample, then prune by context
-                .map_err(|e| format!("smie recall_vec: {e}"))?;
-
-            // optional context filtering (prefix like "[ctx:ui_context]")
-            if !self.contexts.is_empty() {
-                hits.retain(|(_, _, _, text)| {
-                    self.contexts.iter().any(|c|
-                        text.starts_with(&format!("[ctx:{}]", c)))
-                });
-            }
-
-            // map to retriever hits, take top_k
-            let mut out = Vec::new();
-            for (id, score, _tags, text) in hits.into_iter() {
-                out.push(MemoryHit { id: id.to_string(), sim: score, text });
-                if out.len() >= top_k { break; }
-            }
-            Ok(out)
-        }
-    }
-    /// Vector "store" that reads recent rows from SQLite and scores them on the fly.
-    /// This is a pragmatic bridge until FAISS/ANN is wired.
-    struct UiSqliteVectorStore {
-        pub contexts: Vec<String>,
-        pub max_scan: usize,
-    }
-
-    impl VectorStore for UiSqliteVectorStore {
-        fn search(
-            &self,
-            query: &Embedding,
-            top_k: usize,
-        ) -> Result<Vec<MemoryHit>, Box<dyn Error + Send + Sync>> {
-            let mut rows: Vec<(String, String)> = Vec::new();
-
-            // Pull recent memory from the configured contexts
-            for ctx in &self.contexts {
-                if let Ok(mut entries) = recall_all(ctx) {
-                    // newest first
-                    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-                    for e in entries.into_iter().take(self.max_scan) {
-                        rows.push((format!("{}:{}", ctx, e.timestamp), e.data));
-                    }
-                }
-            }
-
-            // Score by cosine(query, embed(text))
-            let mut scored: Vec<MemoryHit> = Vec::with_capacity(rows.len());
-            for (id, text) in rows {
-                if let Ok(vec) = generate_embedding(&text) {
-                    let sim = cosine(query, vec);
-                    scored.push(MemoryHit { id, sim, text });
-                }
-            }
-
-            // sort & top-k
-            scored.sort_by(|a, b| {
-                b.sim
-                    .partial_cmp(&a.sim)
-                    .unwrap_or(std::cmp::Ordering::Equal)
             });
-            if scored.len() > top_k {
-                scored.truncate(top_k);
+
+            ui.separator();
+            ui.label("Status / Answer:");
+            ui.monospace(&state.status);
+
+            ui.separator();
+            ui.label("Top Hits:");
+            if state.results.is_empty() {
+                ui.label("—");
+            } else {
+                for (i,(id,score,t,text)) in state.results.iter().enumerate() {
+                    ui.monospace(format!("{}. id={}  score={:.3}  [{}]\n   {}", i+1, id, score, fmt_tags(*t), text));
+                    ui.add_space(6.0);
+                }
             }
-            Ok(scored)
-        }
-    }
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("💾 Save SMIE").clicked() {
+                    std::fs::create_dir_all("data").ok();
+                    match state.smie.save("data/uriel") {
+                        Ok(_) => state.status = "✅ Saved SMIE metadata".into(),
+                        Err(e) => state.status = format!("❌ Save failed: {e}"),
+                    }
+                }
+                if ui.button("📂 Load SMIE").clicked() {
+                    match state.smie.load("data/uriel") {
+                        Ok(_) => state.status = "✅ Loaded SMIE metadata".into(),
+                        Err(e) => state.status = format!("❌ Load failed: {e}"),
+                    }
+                }
+            });
+        });
+    })
 }
-// --------------------------------------------------------------------------

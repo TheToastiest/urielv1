@@ -65,7 +65,7 @@ pub fn handle_input_pfc<B: Backend>(
             let cf = retriever
                 .build_context_frame_from_str(text, &mode)
                 .unwrap_or_else(|_| ContextFrame::empty());
-            let ctx_strings: Vec<String> = cf.top_hits.iter().map(|h| h.text.clone()).collect();
+            let _ctx_strings: Vec<String> = cf.top_hits.iter().map(|h| h.text.clone()).collect();
 
             let frame = CortexInputFrame {
                 raw_input: text,

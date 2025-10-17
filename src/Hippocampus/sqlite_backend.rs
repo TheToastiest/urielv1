@@ -22,6 +22,40 @@ fn default_db_path() -> String {
     // Keep env override, default to ./db/semantic_memory.db
     std::env::var("SMIE_DB_PATH").unwrap_or_else(|_| "data/semantic_memory.db".to_string())
 }
+pub fn upsert_concept_fact(key: &str, value: &str, ts: u64) -> Result<(), SmieError> {
+    let conn = get_connection()?;
+    conn.execute(
+        "INSERT INTO concept_facts (concept_key, value, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(concept_key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        rusqlite::params![key, value, ts as i64],
+    )?;
+    Ok(())
+}
+
+pub fn has_hash(ctx: &str, hash: &str) -> Result<bool, SmieError> {
+    let conn = get_connection()?;
+    let mut stmt = conn.prepare("SELECT 1 FROM memory_hashes WHERE ctx=?1 AND hash=?2 LIMIT 1")?;
+    let exists = stmt.exists(rusqlite::params![ctx, hash])?;
+    Ok(exists)
+}
+pub fn read_concept_fact(key: &str) -> Result<Option<String>, SmieError> {
+    let conn = get_connection()?;
+    let mut stmt = conn.prepare("SELECT value FROM concept_facts WHERE concept_key=?1 LIMIT 1")?;
+    let mut rows = stmt.query(rusqlite::params![key])?;
+    if let Some(row) = rows.next()? { let v: String = row.get(0)?; Ok(Some(v)) } else { Ok(None) }
+}
+
+pub fn record_hash(ctx: &str, hash: &str, ts: u64) -> Result<bool, SmieError> {
+    let conn = get_connection()?;
+    match conn.execute(
+        "INSERT OR IGNORE INTO memory_hashes (ctx, hash, first_seen_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![ctx, hash, ts as i64],
+    )? {
+        1 => Ok(true),   // inserted (new)
+        _ => Ok(false),  // already existed
+    }
+}
 
 fn get_connection() -> Result<Connection, SmieError> {
     let path = default_db_path();

@@ -91,7 +91,7 @@ pub fn ingest<B: Backend>(
 ) -> Result<(), String> {
     // 1) use the provided model to embed
     let z_1xD = model.run_inference(text);                  // Tensor<B, 2>
-    let emb: Vec<f32> = z_1xD.to_data()
+    let _emb: Vec<f32> = z_1xD.to_data()
         .as_slice::<f32>().map_err(|e| format!("tensor to slice: {e:?}"))?
         .to_vec();
 
@@ -220,8 +220,7 @@ pub fn search_by_context<B: Backend>(
     if scored.len() > top_k {
         let k = top_k;
         // partition so top_k highest sims are in scored[..k] (order undefined)
-        let (_, top, _) = scored.select_nth_unstable_by(k, |a, b|
-            b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal)
+        let _ = scored.select_nth_unstable_by(k, |a, b|            b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal)
         );
         // sort just the top_k slice descending
         scored[..k].sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
