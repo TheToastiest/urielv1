@@ -11,8 +11,6 @@ use burn::{
 };
 use burn::tensor::backend::AutodiffBackend;
 
-use rand::{Rng, SeedableRng};
-use rand_chacha::ChaCha20Rng;
 
 use crate::Learning::dataset::JsonlDataset;
 use crate::Learning::loss::{default_weights, total_loss, LossWeights};

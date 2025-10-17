@@ -20,7 +20,7 @@ pub struct SemanticMemoryEntry {
 
 fn default_db_path() -> String {
     // Keep env override, default to ./db/semantic_memory.db
-    std::env::var("SMIE_DB_PATH").unwrap_or_else(|_| "db/semantic_memory.db".to_string())
+    std::env::var("SMIE_DB_PATH").unwrap_or_else(|_| "data/semantic_memory.db".to_string())
 }
 
 fn get_connection() -> Result<Connection, SmieError> {

@@ -26,6 +26,10 @@ path = "src/lib.rs"
 test_support = []
 
 [dependencies]
+ctrlc = "3"
+smie_core = { git = "https://github.com/TheToastiest/smie_core", features = ["ra"] }
+thiserror = "2.0.17"
+raggedy_anndy = { git = "https://github.com/TheToastiest/raggedy_anndy", features = ["persist"] }
 tempfile = "3"
 clap = { version = "4", features = ["derive"] }
 bincode = "1.3"

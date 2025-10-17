@@ -9,7 +9,7 @@ use redis::{Commands, Client};
 use rusqlite::{params, Connection};
 
 use crate::Hippocampus::infer::HippocampusModel; // <- your combined model module
-use crate::Hippocampus::sqlite_backend::{store_entry, SemanticMemoryEntry, recall_all};
+use crate::Hippocampus::sqlite_backend::{SemanticMemoryEntry, recall_all};
 use crate::Hippocampus::redis_backend::get_recent_keys;
 
 // ---------------------------------
