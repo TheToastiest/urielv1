@@ -70,10 +70,16 @@ fn choose_plan(_mode: &super::cortex::CortexReasoningMode) -> Vec<String> {
     // epsilon-greedy bandit later; for now a fixed shallow plan
     vec!["check_db".into(), "probe_smie_norm".into(), "probe_smie_orig".into()]
 }
-fn gather_evidence(_ctx: &super::context_retriever::ContextFrame) -> (Vec<String>, f32, bool) {
-    // TODO: pull ids/scores from ContextFrame; return (evidence, max_cos, db_hit)
-    (vec!["<evidence placeholder>".into()], 0.35, false)
+fn gather_evidence(ctx: &super::context_retriever::ContextFrame) -> (Vec<String>, f32, bool) {
+    let max_cos = ctx.top_hits.first().map(|h| h.sim).unwrap_or(0.0);
+    let ev: Vec<String> = ctx.top_hits
+        .iter()
+        .take(3)
+        .map(|h| format!("smid:{}:{:.2}", h.id, h.sim))
+        .collect();
+    (ev, max_cos, false) // db_hit=false in PFC; the concept path logs DB hits
 }
+
 fn meta_summary(s: &MetaStep) -> String {
     format!(
         "Thinking…\n- goal: {}\n- hypothesis: {}\n- plan: {}\n- confidence: {:.2}\n- outcome: {} (depth {})",

@@ -72,3 +72,89 @@ impl Concept for MentorConcept {
         if l.starts_with("who is your mentor"){ Some("your mentor is".into()) } else { None }
     }
 }
+pub struct PurposeConcept;
+
+impl Concept for PurposeConcept {
+    fn key(&self) -> &'static str { "purpose" }
+
+    fn normalize_question(&self, q: &str) -> Option<String> {
+        let l = q.trim().to_ascii_lowercase();
+        if l.starts_with("what is your purpose")
+            || l.starts_with("what's your purpose")
+        {
+            Some("your purpose is".to_string())
+        } else {
+            None
+        }
+    }
+
+    fn extract_from_statement(&self, s: &str) -> Vec<ConceptHit> {
+        let t = s.trim();
+
+        // "Your purpose is …"
+        let re1 = regex::Regex::new(r"(?i)^\s*your\s+purpose\s+is\s+(.+?)\s*[.!]?\s*$").unwrap();
+        if let Some(c) = re1.captures(t) {
+            let v = c[1].trim();
+            if !v.is_empty() {
+                return vec![ConceptHit { key: "purpose", value: v.to_string(), confidence: 0.95 }];
+            }
+        }
+
+        // "You (were) created to/for …"
+        let re2 = regex::Regex::new(r"(?i)^\s*you\s+(?:were\s+)?created\s+(?:to|for)\s+(.+?)\s*[.!]?\s*$").unwrap();
+        if let Some(c) = re2.captures(t) {
+            let v = c[1].trim();
+            if !v.is_empty() {
+                return vec![ConceptHit { key: "purpose", value: v.to_string(), confidence: 0.90 }];
+            }
+        }
+
+        vec![]
+    }
+}
+
+
+pub struct IdentityConcept;
+
+impl Concept for IdentityConcept {
+    fn key(&self) -> &'static str { "you are" }
+
+    // Return only the normalized clause; the Registry will pair it with `key()`.
+    fn normalize_question(&self, q: &str) -> Option<String> {
+        let l = q.trim().to_ascii_lowercase();
+        if l.starts_with("who are you")
+            || l.starts_with("who're you")
+            || l.contains("who are you?")
+            || l == "who are you"
+        {
+            Some("you are".to_string())
+        } else {
+            None
+        }
+    }
+
+    fn extract_from_statement(&self, s: &str) -> Vec<ConceptHit> {
+        let t = s.trim();
+
+        // 1) "you are X" / "you're X"
+        let re_you_are = Regex::new(r"(?i)^\s*you\s+(?:are|'re)\s+(.+?)\s*[.!]?\s*$").unwrap();
+        if let Some(c) = re_you_are.captures(t) {
+            let v = c[1].trim();
+            let roles = ["creator", "mentor", "owner", "friend", "assistant"];
+            if !v.is_empty() && !roles.iter().any(|w| v.to_ascii_lowercase().contains(w)) {
+                return vec![ConceptHit { key: "you are", value: v.to_string(), confidence: 0.95 }];
+            }
+        }
+
+        // 2) "your name is X" ⇒ identity "you are X"
+        let re_name_is = Regex::new(r"(?i)^\s*your\s+name\s+is\s+(.+?)\s*[.!]?\s*$").unwrap();
+        if let Some(c) = re_name_is.captures(t) {
+            let v = c[1].trim();
+            if !v.is_empty() {
+                return vec![ConceptHit { key: "you are", value: v.to_string(), confidence: 0.90 }];
+            }
+        }
+
+        vec![]
+    }
+}

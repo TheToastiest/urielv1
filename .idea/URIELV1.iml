@@ -5,6 +5,7 @@
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/src/callosum/callosum/callosum/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/uriel_abi/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/src/callosum/callosum/callosum/target" />
     </content>

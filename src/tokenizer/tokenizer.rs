@@ -1,4 +1,4 @@
-// smie_core/src/tokenizer/vocab.rs
+// URIEL/src/tokenizer/vocab.rs
 
 use std::collections::HashMap;
 

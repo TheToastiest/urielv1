@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use URIELV1::callosum::callosum::CorpusCallosum;
-use URIELV1::callosum::event::{CallosumEvent, EventEnvelope};
+use URIELV1::callosum::event::CallosumEvent;
 use URIELV1::callosum::event::test_support::TestDynPayload;
 
 #[test]

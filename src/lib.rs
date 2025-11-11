@@ -11,8 +11,19 @@ pub mod Inference;
 pub mod Learning;
 pub mod Frontal;
 pub mod policy;
-
+pub mod meta;
+pub mod reranker;
+pub mod training;
+pub mod lexicon;
+pub mod tools;
+pub mod riftnet;
 pub mod concepts_and_contexts;
+pub mod knowledge;
+pub mod ffi;
+pub mod soarus;
+pub mod api {
+    pub mod runtime_api;
+}
 
 pub use crate::parietal::{SalienceScore, ParietalRoute};
 //pub use Hippocampus::pipeline::{store_embedding_sqlite,load_embedding_sqlite};

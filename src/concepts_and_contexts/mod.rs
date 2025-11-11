@@ -5,3 +5,6 @@ pub mod registry;
 pub mod learner;
 pub mod router;
 pub mod verbiage;
+pub mod discovery;
+pub mod normalizer;
+pub mod speech_concepts;

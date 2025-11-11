@@ -5,6 +5,8 @@ pub mod trainer;
 pub mod eval;
 pub mod onnx;
 pub mod ab;
+pub mod routercopy;
+pub mod ingest;
 
 // Nice re-exports so callers can `use uriel::Learning::*;`
 pub use dataset::*;

@@ -3,10 +3,51 @@ name = "URIELV1"
 version = "1.0.0"
 edition = "2021"
 
+# Cargo.toml (root) — keep your existing [package], [lib], [[bin]] etc.
+
+[workspace]
+members = [
+    ".",                # your existing URIELV1 crate at the root
+    "crates/uriel_abi", # the new ABI crate we’re about to add
+]
+
+[[bin]]
+name = "uriel_ingest"
+path = "src/bin/uriel_ingest.rs"
+
+[[bin]]
+name = "uriel_learn"
+path = "src/bin/uriel_learn.rs"
+
+[[bin]]
+name = "uriel_sql"
+path = "src/bin/uriel_sql.rs"
+
+[[bin]]
+name = "uriel_oep_train"
+path = "src/bin/uriel_oep_train.rs"
+
 [[bin]]
 name = "uriel_ui"
 path = "src/URIEL_UI.rs"
+required-features = ["ui"]
 
+[[bin]]
+name = "train_routercopy"
+path = "src/bin/train_routercopy.rs"
+
+[[bin]]
+name = "export_routercopy"
+path = "src/bin/export_routercopy.rs"
+
+[[bin]]
+name = "URIEL_AI"
+path = "src/uriel.ai_ui.rs"
+required-features = ["ui"]
+
+[[bin]]
+name = "calibrate_routercopy"
+path = "src/bin/calibrate_routercopy.rs"
 #[[bin]]
 #name = "smie_test"
 #path = "src/main.rs"
@@ -15,6 +56,14 @@ path = "src/URIEL_UI.rs"
 name = "uriel"
 path = "src/bin/uriel_runtime.rs"
 
+[[bin]]
+name = "uriel_trainer"
+path = "src/bin/uriel_trainer.rs"
+
+#[[bin]]
+#name = "train_encoder"
+#path = "src/train_encoder.rs"
+
 #[[bin]]
 #name = "encoder"
 #path = "src/eval_encoder.rs"
@@ -22,13 +71,22 @@ path = "src/bin/uriel_runtime.rs"
 [lib]
 path = "src/lib.rs"
 
+
+#[lib]
+#name = "URIELV1"
+#path = "src/lib.rs"
+#crate-type = ["cdylib", "staticlib"]
+
 [features]
+default = []              # <- no UI by default
+ui = ["eframe"]           # gate GUI behind this
 test_support = []
 
 [dependencies]
+libloading = "0.8"
 fxhash = "0.2.1"
 ctrlc = "3"
-smie_core = { git = "https://github.com/TheToastiest/smie_core", features = ["ra"] }
+smie_core = { git = "https://github.com/TheToastiest/smie_core", default-features = false, features = ["ra"] }
 thiserror = "2.0.17"
 raggedy_anndy = { git = "https://github.com/TheToastiest/raggedy_anndy", features = ["persist"] }
 tempfile = "3"
@@ -45,15 +103,37 @@ crossbeam-channel = "0.5"
 burn = { path = "C:/Users/brinn/Source Builds/burn/crates/burn" }
 burn-autodiff = { path = "C:/Users/brinn/Source Builds/burn/crates/burn-autodiff" }
 burn-tensor = { path = "C:/Users/brinn/Source Builds/burn/crates/burn-tensor" }
+burn-cuda = {path = "C:/Users/brinn/Source Builds/burn/crates/burn-cuda"}
 burn-ndarray = { path = "C:/Users/brinn/Source Builds/burn/crates/burn-ndarray" }
+soarus-bridge   = { path = "C:/Users/brinn/RustroverProjects/vectorsoarus/crates/soarus-bridge" }
+soarus-io       = { path = "C:/Users/brinn/RustroverProjects/vectorsoarus/crates/soarus-io" }
+soarus-core     = { path = "C:/Users/brinn/RustroverProjects/vectorsoarus/crates/soarus-core" }
+nalgebra = { version = "0.33", default-features = false, features = ["std","serde-serialize"] }
 rand = "0.8"
 rand_chacha = "0.3"
 ndarray = "0.15"
 rfd = "0.13"
-eframe = "0.27"
-faiss-sys = "0.6.2"
+eframe = { version = "0.27", optional = true }
 anyhow = "1.0.98"
 once_cell = "1.21.3"
 sha2 = "0.10.9"
-faiss = "0.12.1"
 bytemuck = "1.23.2"
+# Fetch + HTTP (blocking, no OpenSSL)
+reqwest = { version = "0.12.24", default-features = false, features = [
+    "blocking",     # synchronous fetch in your REPL
+    "rustls-tls",   # TLS without OpenSSL headaches
+    "gzip", "brotli", "deflate",  # common content-encodings
+    "charset"       # decode non-UTF8 HTML correctly
+]}
+
+# HTML → plain text
+html2text = "0.6"
+
+# URL parsing / host whitelist checks
+url = "2.5"
+
+# GPU BURN
+chrono = "0.4.42"
+toml = "0.8"
+globwalk = "0.9"
+fastrand = "2.3.0"
