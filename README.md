@@ -25,7 +25,7 @@ Deterministic cognitive routing through the Callosum bus.
 
 Structured episodic memory backed by SQLite (semantic_memory.db).
 
-Contrastive and autoencoding vector backends via Burn and FAISS.
+Contrastive and autoencoding vector backends via Burn and raggedy_anndy.
 
 Modular component graph (Thalamus → PFC → Hippocampus → Corpus).
 
