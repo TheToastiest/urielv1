@@ -21,15 +21,15 @@ pub fn train_router(cfg: &TrainConfig) -> Result<()> {
     <B as Backend>::seed(cfg.seed as u64);
 
     // ---- data ----
-    // Train with HEURISTIC band (legal at inference), Val with NO band (no leakage).
+    // Train with HEURISTIC band (deploy-legal), Val with NO band (no leakage).
     let train = load_router_samples(
         &cfg.data.train_glob,
         cfg.train.seq_len,
         cfg.data.min_conf,
         BandMode::Heuristic, // train band source
-        0.50,                // band_len_frac
-        1.00,                // band_prob
-        cfg.seed,            // rng seed
+        0.25,                // band_len_frac (shorter; avoids overdominance)
+        0.70,                // band_prob (not every sample)
+        cfg.seed,
     )?;
     let val = load_router_samples(
         &cfg.data.val_glob,
@@ -41,7 +41,17 @@ pub fn train_router(cfg: &TrainConfig) -> Result<()> {
         cfg.seed,
     )?;
 
-    // label counts (val)
+    // label counts
+    let (mut tn0, mut tn1, mut tn2, mut tn3) = (0, 0, 0, 0);
+    for s in &train {
+        match s.label {
+            0 => tn0 += 1,
+            1 => tn1 += 1,
+            2 => tn2 += 1,
+            3 => tn3 += 1,
+            _ => {}
+        }
+    }
     let (mut n0, mut n1, mut n2, mut n3) = (0, 0, 0, 0);
     for s in &val {
         match s.label {
@@ -53,34 +63,14 @@ pub fn train_router(cfg: &TrainConfig) -> Result<()> {
         }
     }
     let maj = *[n0, n1, n2, n3].iter().max().unwrap() as f32 / val.len().max(1) as f32;
-
-    // label counts (train) — used for class weights
-    let (mut tn0, mut tn1, mut tn2, mut tn3) = (0, 0, 0, 0);
-    for s in &train {
-        match s.label {
-            0 => tn0 += 1,
-            1 => tn1 += 1,
-            2 => tn2 += 1,
-            3 => tn3 += 1,
-            _ => {}
-        }
-    }
-    let w1 = if tn1 > 0 { tn0 as f32 / tn1 as f32 } else { 1.0 };
-    let class_w = [1.0f32, w1, 1.0f32, 1.0f32];
-
     eprintln!(
         "[data] loaded train={}  val={} | train_counts=[{} {} {} {}]  val_counts=[{} {} {} {}] maj≈{:.3}",
-        train.len(),
-        val.len(),
-        tn0, tn1, tn2, tn3,
-        n0, n1, n2, n3,
-        maj
+        train.len(), val.len(), tn0, tn1, tn2, tn3, n0, n1, n2, n3, maj
     );
     assert!(!train.is_empty(), "No router training samples found.");
 
     // ---- model + optimizer ----
-    // IMPORTANT: vocab=96 because 0 is PAD, and printable ASCII maps to 1..=95.
-    let vocab = 96usize;
+    let vocab = 96usize;       // 0=PAD, 1..=95 printable ASCII
     let d_in = vocab;
     let d_hidden = 256usize;
     let d_out = 4usize;
@@ -101,7 +91,7 @@ pub fn train_router(cfg: &TrainConfig) -> Result<()> {
     let accum = cfg.train.grad_accum.max(1);
 
     'outer: while step < cfg.train.max_steps {
-        // stratified lists for 0/1 (ignore 2/3 for now if absent)
+        // stratified lists for 0/1 (ignore 2/3 if absent)
         let mut idx_dir = Vec::new();
         let mut idx_retr = Vec::new();
         for (i, s) in train.iter().enumerate() {
@@ -168,8 +158,7 @@ pub fn train_router(cfg: &TrainConfig) -> Result<()> {
             let logits = model.forward(x); // [B,4]
             debug_assert_eq!(logits.dims()[1], 4, "RouterHead must output [B,4]");
 
-            // ---------- Manual weighted CE ----------
-            // log-softmax over classes
+            // ---------- Unweighted CE (balanced minibatches already handle class skew) ----------
             let ll = burn::tensor::activation::log_softmax(logits.clone(), 1); // [B,4]
 
             // build one-hot labels [B,4]
@@ -182,18 +171,11 @@ pub fn train_router(cfg: &TrainConfig) -> Result<()> {
 
             // negative log-likelihood per sample
             let nll_b1 = (-(ll * y_oh)).sum_dim(1); // [B,1]
-            let nll_b = nll_b1.squeeze::<1>(1); // [B]
+            let nll_b = nll_b1.squeeze::<1>(1);     // [B]
 
-            // class weights per sample (from TRAIN distribution)
-            let mut w_per_host = Vec::with_capacity(bsz);
-            for &c in labels.iter() {
-                w_per_host.push(class_w[c as usize]);
-            }
-            let w_per = Tensor::<B, 1>::from_floats(w_per_host.as_slice(), &dev); // [B]
-
-            // weighted mean loss
-            let loss = (nll_b * w_per).mean(); // [1]
-            // ----------------------------------------
+            // mean loss (NO class weights)
+            let loss = nll_b.mean(); // [1]
+            // ------------------------------------------------------------------------------------
 
             // logging
             let loss_val = *loss
@@ -240,18 +222,14 @@ pub fn train_router(cfg: &TrainConfig) -> Result<()> {
                     running_loss_cnt = 0;
                 }
                 if step % cfg.train.eval_every == 0 {
-                    let accv =
-                        eval_router::<B>(&model, &val, vocab, cfg.train.seq_len, &dev);
+                    let accv = eval_router::<B>(&model, &val, vocab, cfg.train.seq_len, &dev);
 
                     if accv > best_acc {
                         best_acc = accv;
                         best_step = step;
                         // save a checkpoint whenever we get a new best
                         let _ = save_ckpt(&model, &cfg.checkpoints.dir, step);
-                        eprintln!(
-                            "[best] acc={:.3} at step {} (ckpt saved)",
-                            best_acc, best_step
-                        );
+                        eprintln!("[best] acc={:.3} at step {} (ckpt saved)", best_acc, best_step);
                     }
 
                     if accv >= 0.999 {
@@ -303,9 +281,7 @@ fn eval_router<B: Backend>(
 
         if total == 0 {
             let mut pc = [0usize; 4];
-            for &p in &preds {
-                pc[p as usize] += 1;
-            }
+            for &p in &preds { pc[p as usize] += 1; }
             eprintln!("[eval] pred_hist={:?}", pc);
         }
 
@@ -317,16 +293,11 @@ fn eval_router<B: Backend>(
         }
     }
     let correct = conf[0][0] + conf[1][1] + conf[2][2] + conf[3][3];
-    let acc = if total > 0 {
-        correct as f32 / total as f32
-    } else {
-        0.0
-    };
+    let acc = if total > 0 { correct as f32 / total as f32 } else { 0.0 };
 
     eprintln!(
         "[eval] acc={:.3} n={}  conf=[[{} {} {} {}],[{} {} {} {}],[{} {} {} {}],[{} {} {} {}]]",
-        acc,
-        total,
+        acc, total,
         conf[0][0], conf[0][1], conf[0][2], conf[0][3],
         conf[1][0], conf[1][1], conf[1][2], conf[1][3],
         conf[2][0], conf[2][1], conf[2][2], conf[2][3],
@@ -337,9 +308,7 @@ fn eval_router<B: Backend>(
 }
 
 fn save_ckpt<B: Backend>(model: &RouterHead<B>, dir: &str, step: usize) -> Result<()> {
-    if dir.is_empty() {
-        return Ok(());
-    }
+    if dir.is_empty() { return Ok(()); }
     std::fs::create_dir_all(dir)?;
     let path = std::path::PathBuf::from(format!("{}/router_head_step{:06}.bin", dir, step));
     CompactRecorder::new().record(model.clone().into_record(), path.clone())?;
