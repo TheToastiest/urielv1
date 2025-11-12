@@ -1,0 +1,22 @@
+URIEL SQL STUFF
+# Build
+cargo build --bin uriel_sql
+
+# Purge old UA noise (one time)
+cargo run --bin uriel_sql -- --sql "DELETE FROM learn_negs WHERE qid IN (SELECT id FROM learn_queue WHERE question LIKE 'from http%' OR question LIKE 'from https%');" | Out-Host
+cargo run --bin uriel_sql -- --sql "DELETE FROM learn_queue WHERE question LIKE 'from http%' OR question LIKE 'from https%' OR lower(positive) LIKE 'please set a user-agent%';" | Out-Host
+# (Optional) vacuum
+# NOTE: rusqlite requires a separate call for VACUUM:
+cargo run --bin .\uriel_sql --sql "VACUUM;"
+
+# Verify clean learn_queue
+cargo run --bin 
+.\uriel_sql --sql "SELECT id, datetime(ts,'unixepoch') as t, substr(question,1,60) AS q, substr(positive,1,60) AS pos, printf('%.3f', 1.0 - COALESCE(hardness,0.5)) AS reward FROM learn_queue ORDER BY id DESC LIMIT 20;" --format tsv | more
+
+# Inspect promoted facts
+cargo run --bin 
+.\uriel_sql --sql "SELECT substr(predicate,1,24) AS pred, substr(obj_text,1,60) AS val, preferred, printf('%.3f',confidence) AS conf, datetime(ts,'unixepoch') AS ts FROM kg_fact WHERE predicate LIKE 'def:%' OR predicate IN ('name','you are','purpose') ORDER BY ts DESC LIMIT 30;" --format tsv | more
+
+# How many unconsumed learning items remain?
+cargo run --bin 
+.\uriel_sql --sql "SELECT COUNT(*) AS remaining FROM learn_queue WHERE used=0;" --format tsv

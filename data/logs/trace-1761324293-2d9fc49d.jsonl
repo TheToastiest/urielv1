@@ -1,0 +1,3 @@
+{"ts":1761324302,"trace_id":"1761324293-2d9fc49d","turn_id":"1761324302-1598473504","domain":"chat","event":"CALL","role":"agent","op":"read_fact","arg":{"type":"concept_key","value":"name"},"policy":"rule"}
+{"ts":1761324302,"trace_id":"1761324293-2d9fc49d","turn_id":"1761324302-1598473504","domain":"chat","event":"OBS","role":"tool","tool":"db","obs":[{"id":"cf:name","kind":"doc","source_id":"name","url":null,"sha256":null,"fetched_at":1761324302,"excerpt":"URIEL. This means, you are URIEL","quality":{"trust_w":0.8,"recency_w":0.7,"method_w":0.3}}]}
+{"ts":1761324302,"trace_id":"1761324293-2d9fc49d","turn_id":"1761324302-1598473504","domain":"chat","event":"FINAL","role":"agent","label":"O_K","text":"I am URIEL. This means, you are URIEL.","calibrated_p":0.53}

@@ -1,0 +1,39 @@
+task = "router"                # router | encoder | sft
+run_id = "router-v1-dev"
+device = "cuda:0"
+precision = "bf16"
+seed = 1337
+
+[model]
+name = "router-small-v1"
+
+[train]
+seq_len = 1024
+micro_batch = 1
+grad_accum = 16
+lr = 2e-4
+warmup_steps = 500
+scheduler = "cosine"
+weight_decay = 0.01
+max_steps = 2000
+log_every = 1
+eval_every = 200
+checkpoint_every = 5
+
+[data]
+train_glob = "datasets/router/**/**/**/train/*.jsonl"
+val_glob   = "datasets/router/**/**/**/val/*.jsonl"
+bucket_boundaries = [128, 256, 512, 1024]
+pack_sequences = true
+num_workers = 2
+dedup = true
+min_conf = 0.4
+
+[checkpoints]
+dir = "ckpts/router-v1"
+keep_last = 2
+keep_best = 1
+
+[export]
+onnx = true
+quantize = "none"

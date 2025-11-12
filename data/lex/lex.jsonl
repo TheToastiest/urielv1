@@ -1,0 +1,4 @@
+{"lemma":"be","pos":"VERB","forms":[{"form":"am","features":{"person":1,"number":"sg","tense":"pres"}},{"form":"are","features":{"person":2,"number":"sg","tense":"pres"}},{"form":"is","features":{"person":3,"number":"sg","tense":"pres"}},{"form":"are","features":{"number":"pl","tense":"pres"}},{"form":"was","features":{"person":1,"number":"sg","tense":"past"}},{"form":"were","features":{"number":"pl","tense":"past"}}],"senses":["to exist","to have identity"],"synonyms":["exist","constitute"],"source":"seed"}
+{"lemma":"purpose","pos":"NOUN","senses":["the reason something exists"],"synonyms":["aim","mission","goal"],"source":"seed"}
+{"lemma":"help","pos":"VERB","synonyms":["assist","support","aid"],"source":"seed"}
+{"lemma":"build","pos":"VERB","synonyms":["create","construct","forge","develop"],"source":"seed"}
