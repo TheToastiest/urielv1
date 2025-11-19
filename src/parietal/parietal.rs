@@ -1,11 +1,14 @@
+// parietal//perietal.rs
+
 use std::collections::{HashMap, HashSet};
 use crate::Microthalamus::microthalamus::SyntheticDrive;
 // ⬇️ Use a pure embedder (no storage!) for drive alignment
 use crate::Hippocampus::infer::embed_text;
 // ⬇️ Thalamus-side deps for ingestion + error
-use crate::Hippocampus::{ingest, SmieError};
 use burn::tensor::backend::Backend;
 use crate::Hippocampus::infer::HippocampusModel;
+use anyhow::Result;
+use crate::Hippocampus::pipeline::ingest;
 
 /* ---------- Tunables ---------- */
 const W_URGENCY: f32 = 0.35;
@@ -245,14 +248,13 @@ pub fn handle_input_with_thalamus<B: Backend>(
     input: &str,
     source: &InputType,
     drives: &HashMap<String, SyntheticDrive>,
-) -> Result<(SalienceScore, ParietalRoute), SmieError> {
+) -> Result<(SalienceScore, ParietalRoute)> {
     let source_str = source.to_string();
 
     // Forced store (prefixes)
     if let Some(payload) = strip_force_store_prefix(input) {
         let (salience, _route) = evaluate_input(payload, drives);
-        ingest(hip_model, context, payload, TTL_DEFAULT, &source_str)
-            .map_err(SmieError::Other)?;
+        ingest(hip_model, context, payload, TTL_DEFAULT, &source_str)?;
         if ALWAYS_ACK_STORE {
             println!("(stored) {payload}");
         }
@@ -266,14 +268,14 @@ pub fn handle_input_with_thalamus<B: Backend>(
     match route {
         ParietalRoute::Respond => {
             // Speak via PFC later, but also persist the input (as you already do)
-            ingest(hip_model, context, input, TTL_DEFAULT, &source_str)
-                .map_err(SmieError::Other)?;
+            ingest(hip_model, context, input, TTL_DEFAULT, &source_str)?;
+
             // Don't print here; let PFC/Frontal produce the main reply.
         }
         ParietalRoute::StoreOnly => {
             // Always acknowledge + store; *no* heavy actions/search.
-            ingest(hip_model, context, input, TTL_DEFAULT, &source_str)
-                .map_err(SmieError::Other)?;
+            ingest(hip_model, context, input, TTL_DEFAULT, &source_str)?;
+
             if ALWAYS_ACK_STORE {
                 println!("(stored)");
             }
@@ -287,8 +289,8 @@ pub fn handle_input_with_thalamus<B: Backend>(
             }
             // If you want a tiny memory of low-drive turns, keep it with a short TTL:
             // (comment this out if you don't want *any* side effects)
-            ingest(hip_model, context, input, TTL_SUPPRESSED, &source_str)
-                .map_err(SmieError::Other)?;
+            ingest(hip_model, context, input, TTL_SUPPRESSED, &source_str)?;
+
             // Early return; don't escalate to PFC.
             return Ok((salience, ParietalRoute::Suppress));
         }

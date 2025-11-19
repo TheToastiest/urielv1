@@ -11,13 +11,13 @@ members = [
     "crates/uriel_abi", # the new ABI crate we’re about to add
 ]
 
-[[bin]]
-name = "uriel_ingest"
-path = "src/bin/uriel_ingest.rs"
-
-[[bin]]
-name = "uriel_learn"
-path = "src/bin/uriel_learn.rs"
+#[[bin]]
+#name = "uriel_ingest"
+#path = "src/bin/uriel_ingest.rs"
+#
+#[[bin]]
+#name = "uriel_learn"
+#path = "src/bin/uriel_learn.rs"
 
 [[bin]]
 name = "uriel_sql"
@@ -86,7 +86,6 @@ test_support = []
 libloading = "0.8"
 fxhash = "0.2.1"
 ctrlc = "3"
-smie_core = { git = "https://github.com/TheToastiest/smie_core", default-features = false, features = ["ra"] }
 thiserror = "2.0.17"
 raggedy_anndy = { git = "https://github.com/TheToastiest/raggedy_anndy", features = ["persist"] }
 tempfile = "3"

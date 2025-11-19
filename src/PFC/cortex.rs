@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::Microthalamus::microthalamus::SyntheticDrive;
 use crate::parietal::parietal::SalienceScore;
+use crate::rag_agent::retriever::UnifiedRetriever;
 
 use super::reasoning_selector::select_reasoning_mode;
 // ⬇️ pull in the type, not the free fn
@@ -192,18 +193,126 @@ pub fn execute_cortex_with_ctx(
 
 
 // Back-compat shim: still defaults to dry-run, but now also needs retriever
-pub fn execute_cortex(frame: CortexInputFrame, retriever: &ContextRetriever) -> CortexOutput {
-    let actx = ActionContext { dry_run: true, source: "cortex" };
-    execute_cortex_with_ctx(frame, &actx, retriever)
+
+pub fn execute_cortex_with_rag(
+    frame: CortexInputFrame,
+    actx: &ActionContext,
+    rag: &UnifiedRetriever,
+) -> CortexOutput {
+    // for now, reuse the inner ContextRetriever
+    execute_cortex_with_ctx(frame, actx, rag.ctx.as_ref())
 }
 
-// Legacy convenience: also pass retriever through
-pub fn execute_cortex_compat<'a>(
-    input: &'a str,
-    score: SalienceScore,
-    drives: &'a HashMap<String, SyntheticDrive>,
-    retriever: &ContextRetriever,
+pub fn execute_cortex_rag<'a>(
+    frame: CortexInputFrame<'a>,
+    rag: &UnifiedRetriever,
 ) -> CortexOutput {
-    let frame = CortexInputFrame { raw_input: input, score, drives };
-    execute_cortex(frame, retriever)
+    use crate::PFC::context_retriever::{ContextFrame, MemoryHit};
+
+    // 0) meta init
+    let sink = StdoutMetaSink;
+    let goal = "answer user question".to_string();
+    let hypothesis = propose_hypothesis(frame.raw_input);
+
+    // Bias toward DirectRecall for CLI
+    let mode = CortexReasoningMode::DirectRecall;
+    let mut plan = choose_plan(&mode);
+    let mut depth: u8 = 0;
+
+    // 1) first try the unified ContextRetriever (VS + text etc.)
+    let retriever: &ContextRetriever = rag.ctx.as_ref();
+    let mut context: ContextFrame = retriever
+        .build_context_frame(&frame, &mode)
+        .unwrap_or_else(|_| ContextFrame::empty());
+
+    eprintln!(
+        "[rag-debug] ctx hits={} max_sim={:.3}",
+        context.top_hits.len(),
+        context.top_hits.first().map(|h| h.sim).unwrap_or(0.0),
+    );
+
+    // 2) If that returns nothing, fall back to raw SMIE text search
+    if context.top_hits.is_empty() {
+        if let Some(text_search) = rag.text.as_ref() {
+            match text_search.search_text(frame.raw_input, 8) {
+                Ok(hits) if !hits.is_empty() => {
+                    let mapped: Vec<MemoryHit> = hits
+                        .into_iter()
+                        .map(|h| MemoryHit {
+                            id: h.id,
+                            sim: h.sim,
+                            text: h.text,
+                        })
+                        .collect();
+                    let max_sim = mapped.first().map(|h| h.sim).unwrap_or(0.0);
+                    eprintln!(
+                        "[rag-debug] smie fallback hits={} max_sim={:.3}",
+                        mapped.len(),
+                        max_sim
+                    );
+                    context.top_hits = mapped;
+                    context.confidence = max_sim;
+                }
+                Ok(_) => {
+                    eprintln!("[rag-debug] smie fallback found 0 hits");
+                }
+                Err(e) => {
+                    eprintln!("[rag-debug] smie fallback error: {e}");
+                }
+            }
+        }
+    }
+
+    // 3) evidence + confidence from the final context
+    let (evidence, max_cos, db_hit) = gather_evidence(&context);
+    let drive_align = frame
+        .drives
+        .values()
+        .map(|d| d.weight)
+        .fold(0.0_f32, f32::max);
+    let mut confidence = combine_confidence(db_hit, max_cos, drive_align);
+
+    // 4) optional deep pass (rebuild context with same mode for now)
+    let ctx_for_solve = if confidence >= 0.65 {
+        context
+    } else {
+        depth = 1;
+        plan.push("expand_probes".into());
+        let deeper: ContextFrame = retriever
+            .build_context_frame(&frame, &mode)
+            .unwrap_or_else(|_| ContextFrame::empty());
+        let (_ev2, max_cos2, db2) = gather_evidence(&deeper);
+        confidence = confidence.max(combine_confidence(db2, max_cos2, drive_align));
+        deeper
+    };
+
+    let outcome = if confidence >= 0.55 { "accepted" } else { "revise" }.to_string();
+
+    // 5) record meta
+    let step = MetaStep {
+        goal,
+        hypothesis,
+        plan,
+        needed: vec![],
+        evidence,
+        confidence,
+        depth,
+        outcome: outcome.clone(),
+        ts: now_sec(),
+    };
+    sink.record(&step);
+
+    // 6) solve + compose into a real answer
+    let draft: CortexDraftOutput = solve_with_context(&mode, &frame, &ctx_for_solve);
+
+    let answer_text = draft.response.unwrap_or_else(|| {
+        "I don’t know yet; my memory doesn’t have a strong answer for that.".to_string()
+    });
+
+    let meta = CortexOutput::Thought(meta_summary(&step));
+    let verbal = CortexOutput::VerbalResponse(answer_text);
+
+    CortexOutput::Multi(vec![meta, verbal])
 }
+
+

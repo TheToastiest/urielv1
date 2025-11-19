@@ -3,14 +3,51 @@
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use burn::tensor::backend::Backend;
 use burn_ndarray::NdArray;
 use redis::{Commands, Client};
 use rusqlite::{params, Connection};
 
-use crate::Hippocampus::infer::HippocampusModel; // <- your combined model module
 use crate::Hippocampus::sqlite_backend::{SemanticMemoryEntry, recall_all};
 use crate::Hippocampus::redis_backend::get_recent_keys;
+use crate::Hippocampus::ids::make_mem_id;
+// src/Hippocampus/pipeline.rs (replace the old ingest)
+use anyhow::Result;
+use burn::tensor::backend::Backend;
+use crate::Hippocampus::infer::{HippocampusModel, embed_text};
+use crate::memory::{append_memory, store_embedding};
+
+pub fn ingest<B: Backend>(
+    model: &HippocampusModel<B>,
+    context: &str,
+    text: &str,
+    _ttl_secs: u64,
+    _source: &str,
+) -> anyhow::Result<()> {
+    let ts = append_memory(context, text, None)
+        .map_err(|e| anyhow::anyhow!("ledger append failed: {e}"))?;
+
+    let pre = embed_text(text);
+    let z = model.forward_from_vec(&pre);
+    let emb = z
+        .to_data()
+        .as_slice::<f32>()
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?
+        .to_vec();
+
+    // DEBUG: see exactly what we’re storing
+    eprintln!(
+        "[hippo-ingest] ctx={} ts={} len={} first={:.4}",
+        context,
+        ts,
+        emb.len(),
+        emb.first().copied().unwrap_or(0.0)
+    );
+
+    store_embedding(context, ts, &emb, "db/semantic_embeddings.db")
+        .map_err(|e| anyhow::anyhow!("store_embedding failed: {e}"))?;
+
+    Ok(())
+}
 
 // ---------------------------------
 // Embedding SQLite (vector) helpers
@@ -81,44 +118,6 @@ type B = NdArray<f32>;
 fn l2_norm_in_place(v: &mut [f32]) {
     let n = (v.iter().map(|x| x * x).sum::<f32>()).sqrt().max(1e-6);
     for x in v { *x /= n; }
-}
-pub fn ingest<B: Backend>(
-    model: &HippocampusModel<B>,
-    context: &str,
-    text: &str,
-    _ttl: u64,
-    source: &str,
-) -> Result<(), String> {
-    // 1) use the provided model to embed
-    let z_1xD = model.run_inference(text);                  // Tensor<B, 2>
-    let _emb: Vec<f32> = z_1xD.to_data()
-        .as_slice::<f32>().map_err(|e| format!("tensor to slice: {e:?}"))?
-        .to_vec();
-
-    // 2) store the text row
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| format!("timestamp: {e:?}"))?
-        .as_secs();
-
-    super::sqlite_backend::store_entry(context, text, Some(ts))
-        .map_err(|e| format!("SQLite (semantic_memory) error: {e:?}"))?;
-
-    // 3) store the learned embedding under a stable key
-    let key = format!("sm:{context}:{ts}");
-    let mut emb: Vec<f32> = z_1xD
-        .to_data()
-        .as_slice::<f32>()
-        .map_err(|e| format!("{e:?}"))?   // <-- convert to String
-        .to_vec();
-    l2_norm_in_place(&mut emb);
-    store_embedding_sqlite(&key, &emb)?;
-    println!(
-        "[SMIE::Ingest] ctx={context} src={source} first_dim={:.4} key={key}",
-        emb.first().copied().unwrap_or(0.0)
-    );
-
-    Ok(())
 }
 
 /// Recall recent items (by Redis recency index). Returns text rows ready for context.

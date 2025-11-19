@@ -1,14 +1,12 @@
 // src/bin/uriel_ingest.rs
-//! Autonomous .txt ingester for URIEL (SMIE + Hippocampus pipeline).
+//! Autonomous .txt ingester for URIEL (Hippocampus + concept_facts).
 //!
 //! Usage:
 //!   cargo run --bin uriel_ingest -- [--from-start] <file-or-dir> [<file-or-dir> ...]
 //!
 //! Env (optional):
-//!   SMIE_DB_PATH=data/semantic_memory.db
-//!   SMIE_STORE_DIR=data/uriel
-//!   URIEL_ENCODER_PATH=R:/uriel/models/checkpoints/uriel_encoder_step008500.bin
-//!   OEP_WEIGHTS_PATH=data/oep_w.json
+//!   SMIE_DB_PATH=data/semantic_memory.db     (still used as SQLite path)
+//!   URIEL_ENCODER_PATH=R:/.../uriel_encoder_step008500.bin
 //!   INGEST_CTX=default
 //!   INGEST_CTX_PER_FILE=1
 //!   INGEST_TTL_SECS=604800
@@ -20,7 +18,7 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
@@ -31,7 +29,6 @@ use ctrlc;
 use regex::Regex;
 use rusqlite;
 use sha2::{Digest, Sha256};
-use smie_core::{Embedder as SmieEmbedder, Metric, Smie, SmieConfig, tags};
 
 use URIELV1::Hippocampus::infer::HippocampusModel;
 use URIELV1::Hippocampus::pipeline;
@@ -41,7 +38,8 @@ use URIELV1::Hippocampus::sqlite_backend::{
 
 type B = NdArray<f32>;
 
-// ---------------------- small utils ----------------------
+/* ---------------------- small utils ---------------------- */
+
 fn now_sec() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -91,7 +89,8 @@ fn sha256_hex(s: &str) -> String {
     hex
 }
 
-// ---------------------- schema bootstrap ----------------------
+/* ---------------------- schema bootstrap ---------------------- */
+
 fn ensure_runtime_schema(conn: &rusqlite::Connection) -> anyhow::Result<()> {
     conn.execute_batch(
         r#"
@@ -133,133 +132,8 @@ fn ensure_runtime_schema(conn: &rusqlite::Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------------------- SMIE embedder (HIPPO) ----------------------
-#[derive(serde::Deserialize, serde::Serialize, Clone)]
-struct OepWeightsFile {
-    dim: usize,
-    w: Vec<f32>,
-    updated_at: i64,
-}
+/* ---------------------- definition helpers ---------------------- */
 
-/// Minimal HIPPO-backed embedder for SMIE with optional diagonal OEP weights.
-struct SmieHippEmbed<Bk: Backend> {
-    model: Arc<Mutex<HippocampusModel<Bk>>>,
-    dim: usize,
-    oep_w: RwLock<Option<Vec<f32>>>,
-    oep_path: String,
-    oep_mtime: RwLock<Option<SystemTime>>,
-}
-
-impl<Bk: Backend> SmieHippEmbed<Bk> {
-    fn new(model: Arc<Mutex<HippocampusModel<Bk>>>) -> anyhow::Result<Self> {
-        let dim = {
-            let m = model
-                .lock()
-                .map_err(|_| anyhow::anyhow!("model lock poisoned"))?;
-            let z = m.run_inference("[dim-probe]");
-            z.to_data()
-                .as_slice::<f32>()
-                .map_err(|e| anyhow::anyhow!("{e:?}"))?
-                .len()
-        };
-
-        let path = env::var("OEP_WEIGHTS_PATH").unwrap_or_else(|_| "data/oep_w.json".to_string());
-        let mut w: Option<Vec<f32>> = None;
-        let mut mt: Option<SystemTime> = None;
-        if let Ok(md) = fs::metadata(&path) {
-            if let Ok(txt) = fs::read_to_string(&path) {
-                if let Ok(wf) = serde_json::from_str::<OepWeightsFile>(&txt) {
-                    if wf.dim == dim && wf.w.len() == dim {
-                        w = Some(wf.w);
-                        mt = md.modified().ok();
-                        eprintln!("[oep] loaded {}", path);
-                    }
-                }
-            }
-        }
-
-        Ok(Self {
-            model,
-            dim,
-            oep_w: RwLock::new(w),
-            oep_path: path,
-            oep_mtime: RwLock::new(mt),
-        })
-    }
-
-    fn maybe_hot_reload(&self) {
-        if let Ok(md) = fs::metadata(&self.oep_path) {
-            let now_mt = md.modified().ok();
-            let last_mt = *self.oep_mtime.read().unwrap();
-            if now_mt.is_some() && now_mt != last_mt {
-                if let Ok(txt) = fs::read_to_string(&self.oep_path) {
-                    if let Ok(wf) = serde_json::from_str::<OepWeightsFile>(&txt) {
-                        if wf.dim == self.dim && wf.w.len() == self.dim {
-                            *self.oep_w.write().unwrap() = Some(wf.w);
-                            *self.oep_mtime.write().unwrap() = now_mt;
-                            eprintln!("[oep] hot-reloaded {}", self.oep_path);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn save(&self) {
-        if let Some(w) = self.oep_w.read().unwrap().as_ref() {
-            let obj = OepWeightsFile {
-                dim: self.dim,
-                w: w.clone(),
-                updated_at: now_sec() as i64,
-            };
-            if let Ok(txt) = serde_json::to_string_pretty(&obj) {
-                let _ = fs::create_dir_all("data");
-                let _ = fs::write(&self.oep_path, txt);
-            }
-        }
-    }
-}
-
-impl<Bk: Backend> SmieEmbedder for SmieHippEmbed<Bk> {
-    fn dim(&self) -> usize {
-        self.dim
-    }
-    fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
-        self.maybe_hot_reload();
-
-        let m = self
-            .model
-            .lock()
-            .map_err(|_| anyhow::anyhow!("model lock poisoned"))?;
-        let z = m.run_inference(text);
-        let mut v = z
-            .to_data()
-            .as_slice::<f32>()
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?
-            .to_vec();
-        drop(m);
-
-        // L2 normalize
-        let n0 = (v.iter().map(|x| x * x).sum::<f32>()).sqrt().max(1e-6);
-        for x in &mut v {
-            *x /= n0;
-        }
-
-        // Diagonal weights (if any) + renorm
-        if let Some(w) = self.oep_w.read().unwrap().as_ref() {
-            for i in 0..self.dim {
-                v[i] *= w[i];
-            }
-            let n1 = (v.iter().map(|x| x * x).sum::<f32>()).sqrt().max(1e-6);
-            for x in &mut v {
-                *x /= n1;
-            }
-        }
-        Ok(v)
-    }
-}
-
-// ---------------------- definition helpers ----------------------
 fn ascii_norm(s: &str) -> String {
     s.replace('’', "'")
         .replace('‘', "'")
@@ -283,10 +157,10 @@ fn strip_topic_parens(s: &str) -> String {
     s.to_string()
 }
 
-// Accepts:
-//  1) Topic (Paren)? is Desc
-//  2) Topic: Desc   or   Topic - Desc / Topic — Desc
-//  3) Desc is Topic  (reversed; we flip to Topic: Desc)
+/// Accepts:
+///  1) Topic (Paren)? is Desc
+///  2) Topic: Desc   or   Topic - Desc / Topic — Desc
+///  3) Desc is Topic  (reversed; we flip to Topic: Desc)
 fn extract_definition(line: &str) -> Option<(String, String)> {
     let l = ascii_norm(line);
     let cop = r"(?:is|are|refers\s+to|means|=)";
@@ -333,7 +207,11 @@ fn extract_definition(line: &str) -> Option<(String, String)> {
 }
 
 fn topic_surface_norm(s: &str) -> String {
-    ascii_norm(s).to_ascii_lowercase().replace(['–', '—'], "-").trim().to_string()
+    ascii_norm(s)
+        .to_ascii_lowercase()
+        .replace(['–', '—'], "-")
+        .trim()
+        .to_string()
 }
 
 fn maybe_singular(s: &str) -> String {
@@ -412,12 +290,14 @@ fn read_alias(surface_norm: &str) -> Option<String> {
     let k = format!("alias:{}", surface_norm);
     read_concept_fact(&k).ok().flatten()
 }
+
 fn write_alias(conn: &rusqlite::Connection, surface_norm: &str, canonical: &str, ts: u64) {
     let k = format!("alias:{}", surface_norm);
     let _ = safe_upsert_concept_fact(conn, "ingest", &k, canonical, ts, Some("alias"), None);
 }
 
-// ---------------------- tailers ----------------------
+/* ---------------------- tailers ---------------------- */
+
 fn spawn_tail_source(
     path: PathBuf,
     from_start: bool,
@@ -503,7 +383,8 @@ fn spawn_dir_rescanner(
     });
 }
 
-// ---------------------- main ----------------------
+/* ---------------------- main ---------------------- */
+
 fn main() -> Result<()> {
     // ---- parse args / env ----
     let mut args: Vec<String> = env::args().skip(1).collect();
@@ -522,7 +403,6 @@ fn main() -> Result<()> {
 
     let smie_db_path =
         env::var("SMIE_DB_PATH").unwrap_or_else(|_| "data/semantic_memory.db".to_string());
-    let smie_store_dir = env::var("SMIE_STORE_DIR").unwrap_or_else(|_| "data/uriel".to_string());
     let encoder_path = env::var("URIEL_ENCODER_PATH")
         .unwrap_or_else(|_| "R:/uriel/models/checkpoints/uriel_encoder_step008500.bin".to_string());
     let ttl_secs: u64 = env::var("INGEST_TTL_SECS")
@@ -546,22 +426,10 @@ fn main() -> Result<()> {
     ensure_runtime_schema(&conn)?;
     conn.busy_timeout(Duration::from_millis(500)).ok();
 
-    // ---- model + SMIE ----
+    // ---- Hippocampus model (no SMIE) ----
     let device = <B as Backend>::Device::default();
     let model = HippocampusModel::<B>::load_or_init(&device, &encoder_path);
-    let model_for_smie =
-        Arc::new(Mutex::new(HippocampusModel::<B>::load_or_init(&device, &encoder_path)));
 
-    let embed = Arc::new(SmieHippEmbed::new(model_for_smie.clone())?);
-    let smie = Arc::new(Smie::new(
-        SmieConfig {
-            dim: embed.dim(),
-            metric: Metric::Cosine,
-        },
-        embed.clone(),
-    )?);
-
-    let _ = smie.load(&smie_store_dir);
     eprintln!(
         "[ingest] ctx_default='{}' per_file={} ttl={}s from_start={} rescan={}s",
         ctx_default, ctx_per_file, ttl_secs, from_start, rescan_secs
@@ -613,13 +481,9 @@ fn main() -> Result<()> {
     // Optional periodic rescan for new .txt files
     spawn_dir_rescanner(roots_for_rescan, known.clone(), tx.clone(), from_start, rescan_secs);
 
-    // ---- ctrl-c graceful save ----
-    let smie_c = smie.clone();
-    let embed_c = embed.clone();
+    // ---- ctrl-c graceful exit (no SMIE save anymore) ----
     ctrlc::set_handler(move || {
-        eprintln!("\n[ingest] SIGINT — saving SMIE and OEP weights...");
-        let _ = smie_c.save("data/uriel");
-        embed_c.save();
+        eprintln!("\n[ingest] SIGINT — shutting down.");
         std::process::exit(0);
     })?;
 
@@ -674,10 +538,10 @@ fn main() -> Result<()> {
             }
         }
 
-        // ----------------- dedupe for SMIE/pipeline -----------------
-        // canonical short form (if we built one) is what we store for retrieval
+        // canonical short form (if we built one) is what we store for recall
         let to_store = ingest_text.as_deref().unwrap_or(&line);
 
+        // ----------------- dedupe -----------------
         let n = normalize_for_hash(to_store);
         let key = sha256_hex(&n);
         if !inproc_seen.insert(format!("{}::{}", &path, key)) {
@@ -688,27 +552,11 @@ fn main() -> Result<()> {
             stats.entry("dedup").and_modify(|c| *c += 1);
             continue;
         }
-        // FIX: record_hash expects u64, not i64
         if let Err(e) = record_hash(&path, &key, ts) {
             eprintln!("[dedupe] record_hash error: {e}");
         }
 
-        // Decide SMIE tags by length (use canonical short text if any)
-        let tmask = if to_store.len() > 180 {
-            tags::SYSTEM | tags::LONG
-        } else {
-            tags::SYSTEM | tags::SHORT
-        };
-
-        // Ingest into SMIE
-        if let Err(e) = smie.ingest(to_store, tmask) {
-            eprintln!("[smie] ingest error: {e:?}");
-            stats.entry("errors").and_modify(|c| *c += 1);
-            continue;
-        }
-
-        // Ingest into Hippocampus rows
-        // Build a String, then pass &str to pipeline::ingest
+        // ----------------- Hippocampus ingest -----------------
         let ctx_owned: String = if ctx_per_file {
             Path::new(&path)
                 .file_stem()
@@ -719,16 +567,13 @@ fn main() -> Result<()> {
             ctx_default.clone()
         };
 
-        // Ensure to_store is &str (not String)
         let to_store: &str = ingest_text.as_deref().unwrap_or(&line);
 
-        // Ingest into Hippocampus rows
         if let Err(e) = pipeline::ingest(&model, &ctx_owned, to_store, ttl_secs, "ingest") {
             eprintln!("[hippo] ingest error: {e:?}");
             stats.entry("errors").and_modify(|c| *c += 1);
             continue;
         }
-
 
         stats.entry("ingested").and_modify(|c| *c += 1);
 
@@ -737,12 +582,8 @@ fn main() -> Result<()> {
                 "[ingest] ok={} dedup={} err={} (last file='{}')",
                 stats["ingested"], stats["dedup"], stats["errors"], path
             );
-            let _ = smie.save(&smie_store_dir);
         }
     }
-
-    let _ = smie.save(&smie_store_dir);
-    embed.save();
 
     eprintln!(
         "[done] ingested={} dedup={} err={}",

@@ -9,6 +9,7 @@ pub mod memory_bridge;
 pub mod kv_facts;
 pub mod fact_parse;
 pub mod hippocampus_adapter;
+pub mod ids;
 
 // Public use for upstream systems
 pub use pipeline::{ingest, uriel_recall};

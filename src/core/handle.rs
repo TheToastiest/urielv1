@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use burn::tensor::{backend::Backend};
+use crate::rag_agent::retriever::UnifiedRetriever;
 
 use crate::Microthalamus::microthalamus::SyntheticDrive;
 use crate::Hippocampus::infer::HippocampusModel;
@@ -11,10 +12,11 @@ use crate::Hippocampus::memory_bridge::{write_memory, MemWrite};
 use crate::parietal::route_cfg::RouteCfg;
 use crate::parietal::infer_route::{decide_route_with_cfg, InferredRoute};
 use crate::PFC::cortex::{
-    execute_cortex, CortexInputFrame, CortexOutput, CortexReasoningMode
+    execute_cortex_rag, CortexInputFrame, CortexOutput, CortexReasoningMode
 };
-use crate::PFC::context_retriever::{ContextRetriever, ContextFrame};
+use crate::PFC::context_retriever::{ContextFrame};
 use crate::Hippocampus::error::SmieError;
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -41,8 +43,9 @@ pub fn handle_input_pfc<B: Backend>(
     text: &str,
     drives: &HashMap<String, SyntheticDrive>,
     route_cfg: &RouteCfg,
-    retriever: &ContextRetriever,
+    rag: &UnifiedRetriever,
 ) -> Result<String, SmieError> {
+
     let (_score, route) = decide_route_with_cfg(text, drives, route_cfg);
     let ts = now_ms();
 
@@ -60,51 +63,42 @@ pub fn handle_input_pfc<B: Backend>(
         }
 
         InferredRoute::Retrieve => {
-            // existing path, but make sure it actually builds context
             let mode = CortexReasoningMode::DirectRecall;
-            let cf = retriever
+            let cf = rag
+                .ctx
                 .build_context_frame_from_str(text, &mode)
                 .unwrap_or_else(|_| ContextFrame::empty());
             let _ctx_strings: Vec<String> = cf.top_hits.iter().map(|h| h.text.clone()).collect();
 
             let frame = CortexInputFrame {
                 raw_input: text,
-                score: _score,                  // if you kept it
-                drives,                         // pass through
+                score: _score, // assuming decide_route_with_cfg returns a SalienceScore
+                drives,
             };
-            let out = execute_cortex(frame, retriever);
-            match out {
-                CortexOutput::VerbalResponse(reply) => Ok(reply),
-                other => Ok(format!("{other:?}")),
-            }
+            let out = execute_cortex_rag(frame, rag);
+            Ok(stringify_output(out))
         }
 
         InferredRoute::Respond => {
-            // 🔹 NEW: still retrieve a *small* context and answer from it
             let mode = CortexReasoningMode::DirectRecall;
-            let cf = retriever
+            let cf = rag
+                .ctx
                 .build_context_frame_from_str(text, &mode)
                 .unwrap_or_else(|_| ContextFrame::empty());
 
             if let Some(best) = cf.top_hits.first() {
-                // naive composer: just surface the best snippet
-                // (works great for your “launch code” demo)
                 return Ok(best.text.clone());
             }
 
-            // fallback to PFC if no memory found
             let frame = CortexInputFrame {
                 raw_input: text,
                 score: _score,
                 drives,
             };
-            
-            let out = execute_cortex(frame, retriever);
-            match out {
-                CortexOutput::VerbalResponse(reply) => Ok(reply),
-                other => Ok(format!("{other:?}")),
-            }
+            let out = execute_cortex_rag(frame, rag);
+            Ok(stringify_output(out))
         }
+
 
         InferredRoute::Suppress => Ok("Suppressed (low salience).".into()),
     }

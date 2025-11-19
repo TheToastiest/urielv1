@@ -25,8 +25,7 @@
     use std::fs::File;
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
     use URIELV1::Learning::ingest::DatasetEmitter;
-
-    use smie_core::{Embedder, Metric, Smie, SmieConfig, tags};
+    use rusqlite::OptionalExtension;
     // Callosum bus + metacog subscriber
     use URIELV1::callosum::callosum::CorpusCallosum;
     use URIELV1::callosum::metacog_subscriber::{spawn_metacog_subscriber, EpisodeEvent, FactUpsertEvent};
@@ -53,6 +52,7 @@
     use URIELV1::knowledge::{schema as kschema, ops as kops, types as ktypes};
     use URIELV1::meta::trace_v2::{TraceSink, Evidence, EvidenceQuality};
     use URIELV1::meta::callobs::{Writer as CofWriter, Op, Arg, FinalLabel};
+    use URIELV1::rag_agent::retriever::UnifiedRetriever;
 
     // ── meta trace (Phase 1)
     use URIELV1::meta::trace::{MetaStep, BanditInfo, SourcesInfo, record_meta_trace};
@@ -75,11 +75,77 @@
     use URIELV1::PFC::context_retriever::{
         TextSearch, ContextRetriever, Embedding, Embeddings, MemoryHit, RetrieverCfg, VectorStore,
     };
-    use URIELV1::PFC::cortex::{execute_cortex, CortexInputFrame, CortexOutput};
+    use URIELV1::PFC::cortex::{execute_cortex_rag, CortexInputFrame, CortexOutput};
     use URIELV1::parietal::parietal::SalienceScore;
 
     // bandit
     use URIELV1::policy::retrieval::{Arm, Bandit};
+    mod smie_stub {
+        use anyhow::Result;
+        use std::sync::Arc;
+
+        // Mirror the old tag bitflags just enough for the masks you use.
+        pub mod tags {
+            pub const SHORT: u64 = 1 << 0;
+            pub const LONG:  u64 = 1 << 1;
+            pub const SYSTEM:u64 = 1 << 2;
+            pub const USER:  u64 = 1 << 3;
+        }
+
+        #[derive(Clone, Copy)]
+        pub enum Metric {
+            Cosine,
+        }
+
+        pub struct SmieConfig {
+            pub dim: usize,
+            pub metric: Metric,
+        }
+
+        // Minimal embedder trait (this is the SMIE-side one, not your PFC Embeddings)
+        pub trait Embedder: Send + Sync {
+            fn dim(&self) -> usize;
+            fn embed(&self, text: &str) -> Result<Vec<f32>>;
+        }
+
+        /// Stub SMIE index: all methods succeed but do nothing.
+        pub struct Smie;
+
+        impl Smie {
+            pub fn new(_cfg: SmieConfig, _emb: Arc<dyn Embedder>) -> Result<Self> {
+                Ok(Smie)
+            }
+
+            pub fn ingest(&self, _text: &str, _tags: u64) -> Result<u64> {
+                // return a fake id
+                Ok(0)
+            }
+
+            pub fn recall(
+                &self,
+                _query: &str,
+                _k: usize,
+                _mask: u64,
+            ) -> Result<Vec<(u64, f32, u64, String)>> {
+                // no hits → forces all SMIE paths to fall back
+                Ok(Vec::new())
+            }
+
+            pub fn tombstone(&self, _id: u64) -> Result<()> {
+                Ok(())
+            }
+
+            pub fn save(&self, _path: &str) -> Result<()> {
+                Ok(())
+            }
+
+            pub fn load(&self, _path: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+    }
+    use smie_stub::{Smie, SmieConfig, Metric, Embedder};
+    use smie_stub::tags;
 
     fn persist_soarus_pose(conn: &mut rusqlite::Connection, o: &URIELV1::soarus::SoarusIcpOutput) -> anyhow::Result<()> {
         // Ensure a tiny table exists (idempotent)
@@ -1351,14 +1417,114 @@
     }
 
 
+    use std::path::Path;
+    use bincode; // already in your deps elsewhere
 
-    // kill SQLite ANN scans
-    struct NullVS;
-    impl VectorStore for NullVS {
-        fn search(&self, _q: &Embedding, _k: usize) -> std::result::Result<Vec<MemoryHit>, Box<dyn Error + Send + Sync>> {
-            Ok(vec![])
+    // Simple brute-force vector store over semantic_embeddings + semantic_memory.
+    struct SqliteVS {
+        emb_path: String,
+        mem_path: String,
+    }
+
+    impl SqliteVS {
+        fn new(emb_path: impl Into<String>, mem_path: impl Into<String>) -> Self {
+            Self {
+                emb_path: emb_path.into(),
+                mem_path: mem_path.into(),
+            }
+        }
+
+        fn l2_norm_in_place(v: &mut [f32]) {
+            let n = (v.iter().map(|x| x * x).sum::<f32>()).sqrt().max(1e-6);
+            for x in v {
+                *x /= n;
+            }
         }
     }
+
+    impl VectorStore for SqliteVS {
+        fn search(
+            &self,
+            q: &Embedding,
+            top_k: usize,
+        ) -> Result<Vec<MemoryHit>, Box<dyn std::error::Error + Send + Sync>> {
+            // Normalize query
+            let mut qv = q.clone();
+            Self::l2_norm_in_place(&mut qv);
+
+            // 1) open embeddings DB
+            let emb_exists = Path::new(&self.emb_path).exists();
+            if !emb_exists {
+                return Ok(vec![]); // nothing stored yet
+            }
+            let conn_emb = rusqlite::Connection::open(&self.emb_path)?;
+
+            let mut stmt = conn_emb.prepare(
+                "SELECT redis_key, embedding FROM semantic_embeddings"
+            )?;
+            let mut rows = stmt.query([])?;
+
+            let mut scored: Vec<(String, f32)> = Vec::new();
+
+            while let Some(row) = rows.next()? {
+                let key: String = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                let mut ev: Vec<f32> = bincode::deserialize(&blob)?;
+                Self::l2_norm_in_place(&mut ev);
+
+                if ev.len() != qv.len() {
+                    continue; // dimension mismatch; skip
+                }
+
+                let sim = qv.iter()
+                    .zip(ev.iter())
+                    .map(|(a, b)| a * b)
+                    .sum::<f32>();
+
+                scored.push((key, sim));
+            }
+
+            if scored.is_empty() {
+                return Ok(vec![]);
+            }
+
+            // 2) rank top_k by similarity
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+            if scored.len() > top_k {
+                scored.truncate(top_k);
+            }
+
+            // 3) open semantic_memory DB to join to text
+            let conn_mem = rusqlite::Connection::open(&self.mem_path)?;
+
+            let mut hits: Vec<MemoryHit> = Vec::with_capacity(scored.len());
+            for (id, sim) in scored {
+                // id = "sm:{context}:{ts}"
+                let parts: Vec<_> = id.split(':').collect();
+                if parts.len() != 3 || parts[0] != "sm" {
+                    continue;
+                }
+                let ctx = parts[1];
+                let ts: i64 = match parts[2].parse() {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                let mut st2 = conn_mem.prepare(
+                    "SELECT data FROM semantic_memory WHERE context = ?1 AND timestamp = ?2 LIMIT 1"
+                )?;
+                let text: Option<String> = st2
+                    .query_row(rusqlite::params![ctx, ts], |r| r.get(0))
+                    .optional()?; // needs rusqlite::OptionalResultExt
+
+                let text = text.unwrap_or_default();
+                hits.push(MemoryHit { id, sim, text });
+            }
+
+            Ok(hits)
+        }
+    }
+
     fn render_concept_answer(key: &str, val: &str) -> String {
         match key {
             "you are" | "name" => format!("I’m {}.", val),
@@ -2335,16 +2501,32 @@
             Some(mc_stop_rx),
         );
 
+        // --- Build RAG Agent ---
         let emb = Arc::new(ModelEmb::new(model_for_emb.clone()));
         let ts  = Arc::new(SmieTextSearch::new(smie.clone()));
         let rcfg = RetrieverCfg { top_k_default: 8, top_k_research: 16, min_score: 0.45, use_cache: true };
-        let retriever = ContextRetriever::new_with_textsearch(
-            Arc::new(NullVS), // keep placeholder ANN for later
-            emb,
-            None,
-            rcfg,
-            Some(ts),
-        );
+
+        let vs = Arc::new(SqliteVS::new(
+            "db/semantic_embeddings.db",
+            &db_path,
+        ));
+        let conn_rag = rusqlite::Connection::open(&db_path)
+            .expect("open db for RAG retriever");
+
+        let rag = Arc::new(UnifiedRetriever {
+            ctx: Arc::new(ContextRetriever::new_with_textsearch(
+                vs.clone(),
+                emb.clone(),
+                None,
+                rcfg,
+                Some(ts.clone()),
+            )),
+            emb: emb.clone(),
+            text: Some(ts.clone()),
+            vs: vs.clone(),
+            conn: Arc::new(conn_rag),
+        });
+
         // ─── Soarus background worker ───
         let (soarus_tx, soarus_rx) = start_worker(8);
 
@@ -2521,7 +2703,62 @@
             // Intent is computed from the main clause
             let intent = infer_intent(&input_main);
 
+            if input_main.to_ascii_lowercase().starts_with("rag ") {
+                let query = input_main[3..].trim();
 
+                let score = SalienceScore {
+                    urgency: 0.3,
+                    familiarity: 0.2,
+                    understanding: 0.5,
+                    drive_alignment: 0.0,
+                    final_weight: 0.35,
+                };
+
+                let frame = CortexInputFrame {
+                    raw_input: query,
+                    score,
+                    drives: &drives,
+                };
+
+                let out = execute_cortex_rag(frame, rag.as_ref());
+
+                match out {
+                    CortexOutput::VerbalResponse(text) => {
+                        println!("{text}");
+                    }
+                    CortexOutput::Thought(t) => {
+                        println!("{t}");
+                    }
+                    CortexOutput::Multi(list) => {
+                        // 1) print the meta Thought if present
+                        for item in &list {
+                            if let CortexOutput::Thought(t) = item {
+                                println!("{t}");
+                                break;
+                            }
+                        }
+                        // 2) then print the first verbal answer if present
+                        let mut printed_verbal = false;
+                        for item in &list {
+                            if let CortexOutput::VerbalResponse(t) = item {
+                                println!("{t}");
+                                printed_verbal = true;
+                                break;
+                            }
+                        }
+                        if !printed_verbal {
+                            eprintln!("[rag] no verbal response in Multi: {list:?}");
+                        }
+                    }
+                    other => {
+                        println!("{other:?}");
+                    }
+                }
+
+
+                // important: skip the rest of the pipeline for this turn
+                continue;
+            }
 
             // Phase 1: per-turn meta trace id + shallow step
             let turn_id = format!("{}-{}", now_sec(), rand::random::<u32>());
@@ -2976,16 +3213,18 @@
                                     }
 
                                     "normalized" => {
-                                        if let Some(v) = answer_concept(&smie, key, &norm, &input_main)? {
+                                        if let Some(v) = answer_concept(key, &norm, &input_main)? {
                                             let val = extract_answer(&norm, &v).unwrap_or_else(|| v.clone());
                                             answer = render_concept_answer(key, &val);
                                             final_kv = Some((key.to_string(), val.clone()));
                                             answered_from = "normalized".into();
 
+                                            // you can keep the evidence/meta logging exactly as before,
+                                            // just treat this as coming from a “normalized” path
                                             let ev = Evidence {
-                                                id: "smie:norm".into(),
+                                                id: format!("cf:{key}:normalized"),
                                                 kind: "log".into(),
-                                                source_id: "smie".into(),
+                                                source_id: "db+rows".into(),
                                                 url: None,
                                                 sha256: None,
                                                 fetched_at: now_sec() as i64,
@@ -2993,12 +3232,13 @@
                                                 quality: EvidenceQuality { trust_w: 0.8, recency_w: 0.7, method_w: 0.3 },
                                             };
                                             let _ = meta2.retrieve("run-1", &turn_id, "chat", vec![ev.clone()], Some("normalized".to_string()));
-                                            let _ = cof.log_obs_evidence(&turn_id, "smie", vec![ev]);
+                                            let _ = cof.log_obs_evidence(&turn_id, "db+rows", vec![ev]);
 
                                             meta_reward = 0.9;
                                             break;
                                         }
                                     }
+
                                     "keyword" => {
                                         if let Ok(hits) = smie.recall(key, 8, mask) {
                                             if let Some(best) = choose_best_for(&norm, &hits) {
@@ -3189,7 +3429,7 @@
                 && matches!(intent, IntentKind::Ask | IntentKind::Compare | IntentKind::Instruct)
             {            let score = SalienceScore { urgency: 0.3, familiarity: 0.2, understanding: 0.5, drive_alignment: 0.0, final_weight: 0.35 };
                 let frame = CortexInputFrame { raw_input: &input_main, score, drives: &drives };
-                let out = execute_cortex(frame, &retriever);
+                let out = execute_cortex_rag(frame, rag.as_ref());
 
                 if concepts.normalize_question(&input_main).is_some() || normalize_question(&input_main).starts_with("you are") {
                     match out {

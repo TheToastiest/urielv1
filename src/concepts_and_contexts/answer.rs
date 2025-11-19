@@ -1,22 +1,29 @@
-use smie_core::{Smie, tags};
 use crate::Hippocampus::sqlite_backend as db;
 use crate::Hippocampus::sqlite_backend::recall_latest;
 
-/// DB → SMIE → newest-row fallback
-pub fn answer_concept(smie:&Smie, key:&str, normalized:&str, _original:&str) -> anyhow::Result<Option<String>> {
+/// DB → newest-row fallback only (no SMIE)
+pub fn answer_concept(
+    key: &str,
+    normalized: &str,
+    _original: &str,
+) -> anyhow::Result<Option<String>> {
+    // 1) direct concept_facts lookup
     if let Some(v) = db::read_concept_fact(key).map_err(|e| anyhow::anyhow!(e.to_string()))? {
         return Ok(Some(v));
     }
-    let mask = tags::SHORT | tags::LONG | tags::SYSTEM | tags::USER;
-    if let Ok(mut hits) = smie.recall(normalized, 16, mask) {
-        hits.retain(|(_,_,_,t)| t.to_ascii_lowercase().contains(key));
-        hits.sort_by(|a,b| b.0.cmp(&a.0).then_with(|| b.1.total_cmp(&a.1)));
-        if let Some((_,_,_,text)) = hits.first() { return Ok(Some(text.clone())); }
-    }
+
+    // 2) loose text search over latest rows as a salvage path
+    let norm_lc = normalized.to_ascii_lowercase();
+    let key_lc  = key.to_ascii_lowercase();
+
     if let Ok(rows) = recall_latest("default", 128) {
         for r in rows {
-            if r.data.to_ascii_lowercase().contains(key) { return Ok(Some(r.data)); }
+            let ld = r.data.to_ascii_lowercase();
+            if ld.contains(&norm_lc) || ld.contains(&key_lc) {
+                return Ok(Some(r.data));
+            }
         }
     }
+
     Ok(None)
 }

@@ -12,7 +12,7 @@ pub mod Learning;
 pub mod Frontal;
 pub mod policy;
 pub mod meta;
-pub mod reranker;
+pub mod rag_agent;
 pub mod training;
 pub mod lexicon;
 pub mod tools;
@@ -21,6 +21,7 @@ pub mod concepts_and_contexts;
 pub mod knowledge;
 pub mod ffi;
 pub mod soarus;
+pub mod memory;
 pub mod api {
     pub mod runtime_api;
 }
